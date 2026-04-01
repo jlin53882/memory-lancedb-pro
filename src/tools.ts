@@ -615,6 +615,7 @@ export function registerMemoryRecallTool(
             })
             .join("\n");
 
+          const modeIndicator = includeFullText ? "full" : "summary";
           const serializedMemories = sanitizeMemoryForSerialization(results);
           if (includeFullText) {
             for (let i = 0; i < results.length; i++) {
@@ -637,6 +638,7 @@ export function registerMemoryRecallTool(
               query,
               scopes: scopeFilter,
               retrievalMode: runtimeContext.retriever.getConfig().mode,
+              mode: modeIndicator,
             },
           };
         } catch (error) {

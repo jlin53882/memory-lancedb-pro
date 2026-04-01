@@ -450,6 +450,8 @@ describe("recall text cleanup", () => {
     const lines = extractRenderedMemoryRecallLines(res.content[0].text);
 
     assert.equal(lines.length, 6, "summary mode should clamp limit to 6");
+    // T5: verify mode indicator is present
+    assert.equal(res.details.mode, "summary", "summary mode should set mode indicator to 'summary'");
   });
 
   it("allows larger limits when includeFullText=true", async () => {
