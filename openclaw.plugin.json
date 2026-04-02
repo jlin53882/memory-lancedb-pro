@@ -151,6 +151,13 @@
         "default": 2000,
         "description": "Maximum character length of the auto-recall query before truncation. Default: 2000."
       },
+      "autoRecallTimeoutMs": {
+        "type": "integer",
+        "minimum": 500,
+        "maximum": 30000,
+        "default": 5000,
+        "description": "Timeout in milliseconds for each auto-recall retrieval call. Helps prevent slow retrieval from blocking response."
+      },
       "maxRecallPerTurn": {
         "type": "integer",
         "minimum": 1,
@@ -1042,6 +1049,11 @@
     "autoRecallMaxQueryLength": {
       "label": "Auto-Recall Max Query Length",
       "help": "Maximum character length of the auto-recall query before truncation. Default: 2000.",
+      "advanced": true
+    },
+    "autoRecallTimeoutMs": {
+      "label": "Auto-Recall Timeout (ms)",
+      "help": "Timeout for each auto-recall retrieval call in milliseconds. Default: 5000ms.",
       "advanced": true
     },
     "recallMode": {
