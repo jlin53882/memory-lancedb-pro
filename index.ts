@@ -46,6 +46,7 @@ import {
 import {
   extractReflectionLearningGovernanceCandidates,
   extractInjectableReflectionMappedMemoryItems,
+  loadAgentReflectionSlicesWithBm25Expansion,
 } from "./src/reflection-slices.js";
 import { createReflectionEventId } from "./src/reflection-event-store.js";
 import { buildReflectionMappedMetadata } from "./src/reflection-mapped-metadata.js";
@@ -1949,7 +1950,7 @@ const memoryLanceDBProPlugin = {
       // Fall back to an uncategorized scan only when the category query produced no
       // agent-owned reflection slices, preserving backward compatibility with mixed-schema stores.
       let entries = await store.list(scopeFilter, "reflection", 240, 0);
-      let slices = loadAgentReflectionSlicesFromEntries({
+      let slices = await loadAgentReflectionSlicesWithBm25Expansion(store, {
         entries,
         agentId,
         deriveMaxAgeMs: DEFAULT_REFLECTION_DERIVED_MAX_AGE_MS,
@@ -1964,7 +1965,7 @@ const memoryLanceDBProPlugin = {
             return false;
           }
         });
-        slices = loadAgentReflectionSlicesFromEntries({
+        slices = await loadAgentReflectionSlicesWithBm25Expansion(store, {
           entries,
           agentId,
           deriveMaxAgeMs: DEFAULT_REFLECTION_DERIVED_MAX_AGE_MS,

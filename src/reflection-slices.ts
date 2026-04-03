@@ -407,10 +407,10 @@ export async function loadAgentReflectionSlicesWithBm25Expansion(
 
     return {
       invariants: base.invariants,
-      derived: expanded,
+      derived: [...base.derived, ...expanded],
       expandedFrom: expanded.length,
     };
   }
 
-  return { invariants: base.invariants, derived: [], expandedFrom: 0 };
+  return { invariants: base.invariants, derived: base.derived.length > 0 ? base.derived : [], expandedFrom: 0 };
 }
