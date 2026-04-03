@@ -2285,9 +2285,9 @@ const memoryLanceDBProPlugin = {
        * Phase 3: adjusts memory importance (boost on use, gentle penalty on miss).
        */
       api.on("before_prompt_build", async (event: any, ctx: any) => {
-        const sessionId = ctx?.sessionId || "default";
-        const pending = pendingRecall.get(sessionId);
-        pendingRecall.delete(sessionId);
+        const sessionKey = ctx?.sessionKey || ctx?.sessionId || "default";
+        const pending = pendingRecall.get(sessionKey);
+        pendingRecall.delete(sessionKey);
         if (!pending || pending.recallIds.length === 0) return;
 
         for (const id of pending.recallIds) {
@@ -2333,20 +2333,29 @@ const memoryLanceDBProPlugin = {
       // Phase 2 agent_end — capture agent response into pendingRecall
       // ========================================================================
       api.on("agent_end", async (event: any, ctx: any) => {
-        const sessionId = ctx?.sessionId || "default";
+        const sessionKey = ctx?.sessionKey || ctx?.sessionId || "default";
         const messages: any[] = Array.isArray(event?.messages) ? event.messages : [];
         const lastMsg = messages[messages.length - 1];
-        const responseText = typeof lastMsg?.content === "string" ? lastMsg.content : "";
-        const pending = pendingRecall.get(sessionId);
+        // Handle Array content (OpenAI format: [{ type: "text", text: "..." }])
+        let responseText = "";
+        if (typeof lastMsg?.content === "string") {
+          responseText = lastMsg.content;
+        } else if (Array.isArray(lastMsg?.content)) {
+          responseText = (lastMsg.content as any[])
+            .filter((part: any) => part?.type === "text")
+            .map((part: any) => part?.text ?? "")
+            .join("\n");
+        }
+        const pending = pendingRecall.get(sessionKey);
         if (!pending || pending.recallIds.length === 0) return;
         pending.responseText = responseText;
-        api.logger.debug?.(`memory-lancedb-pro: agent_end stored response len=${responseText.length} for session=${sessionId}`);
+        api.logger.debug?.(`memory-lancedb-pro: agent_end stored response len=${responseText.length} for session=${sessionKey}`);
       });
 
       // Phase 2 session_end — cleanup pendingRecall
       api.on("session_end", (_event: any, ctx: any) => {
-        const sessionId = ctx?.sessionId || "default";
-        pendingRecall.delete(sessionId);
+        const sessionKey = ctx?.sessionKey || ctx?.sessionId || "default";
+        pendingRecall.delete(sessionKey);
       }, { priority: 20 });
 
       const AUTO_RECALL_TIMEOUT_MS = parsePositiveInt(config.autoRecallTimeoutMs) ?? 5_000; // configurable; default raised from 3s to 5s for remote embedding APIs behind proxies
