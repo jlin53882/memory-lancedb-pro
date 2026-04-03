@@ -227,4 +227,125 @@ describe("stripEnvelopeMetadata", () => {
     // regex requires both message_id AND sender_id
     assert.match(result, /message_id/);
   });
+
+  // -----------------------------------------------------------------------
+  // Phase 2 envelope patterns (GitHub Issue #446)
+  // -----------------------------------------------------------------------
+
+  it("strips <<<EXTERNAL_UNTRUSTED_CONTENT block markers", () => {
+    const input = [
+      "<<<EXTERNAL_UNTRUSTED_CONTENT",
+      "Some actual content here",
+      "<<<END_EXTERNAL_UNTRUSTED_CONTENT",
+    ].join("\n");
+
+    const result = stripEnvelopeMetadata(input);
+    assert.equal(result, "Some actual content here");
+    assert.doesNotMatch(result, /<<<EXTERNAL_UNTRUSTED_CONTENT/);
+    assert.doesNotMatch(result, /<<<END_EXTERNAL_UNTRUSTED_CONTENT/);
+  });
+
+  it("strips <<<END_EXTERNAL_UNTRUSTED_CONTENT marker", () => {
+    const input = [
+      "User: real message",
+      "<<<END_EXTERNAL_UNTRUSTED_CONTENT",
+    ].join("\n");
+
+    const result = stripEnvelopeMetadata(input);
+    assert.match(result, /real message/);
+    assert.doesNotMatch(result, /<<<END_EXTERNAL_UNTRUSTED_CONTENT/);
+  });
+
+  it("strips Sender (untrusted metadata): with JSON block", () => {
+    const input = [
+      "Sender (untrusted metadata):",
+      "```json",
+      '{"label": "ou_abc", "id": "ou_abc", "name": "Test User"}',
+      "```",
+      "",
+      "Actual user message after metadata",
+    ].join("\n");
+
+    const result = stripEnvelopeMetadata(input);
+    assert.equal(result, "Actual user message after metadata");
+    assert.doesNotMatch(result, /untrusted metadata/);
+  });
+
+  it("strips Conversation info (untrusted metadata): with JSON block", () => {
+    const input = [
+      "Conversation info (untrusted metadata):",
+      "```json",
+      '{"message_id": "om_xyz", "sender_id": "ou_xyz"}',
+      "```",
+      "",
+      "User: the actual content",
+    ].join("\n");
+
+    const result = stripEnvelopeMetadata(input);
+    assert.equal(result, "User: the actual content");
+    assert.doesNotMatch(result, /untrusted metadata/);
+    assert.doesNotMatch(result, /message_id/);
+  });
+
+  it("strips Thread starter (untrusted, for context): block", () => {
+    const input = [
+      "Thread starter (untrusted, for context):",
+      "Original thread message here",
+      "",
+      "Reply to the thread",
+    ].join("\n");
+
+    const result = stripEnvelopeMetadata(input);
+    assert.equal(result, "Reply to the thread");
+    assert.doesNotMatch(result, /Thread starter/);
+  });
+
+  it("strips Forwarded message context (untrusted metadata): block", () => {
+    const input = [
+      "Forwarded message context (untrusted metadata):",
+      "Original forwarded text",
+      "",
+      "User: my reply to the forwarded content",
+    ].join("\n");
+
+    const result = stripEnvelopeMetadata(input);
+    assert.equal(result, "User: my reply to the forwarded content");
+    assert.doesNotMatch(result, /Forwarded message context/);
+  });
+
+  it("strips [Queued messages while agent was busy] marker", () => {
+    const input = [
+      "[Queued messages while agent was busy]",
+      "User: first queued message",
+      "User: second queued message",
+    ].join("\n");
+
+    const result = stripEnvelopeMetadata(input);
+    assert.match(result, /first queued message/);
+    assert.match(result, /second queued message/);
+    assert.doesNotMatch(result, /\[Queued messages while agent was busy\]/);
+  });
+
+  it("handles multiple Phase 2 envelope patterns together", () => {
+    const input = [
+      "<<<EXTERNAL_UNTRUSTED_CONTENT",
+      "Sender (untrusted metadata):",
+      "```json",
+      '{"label": "ou_abc"}',
+      "```",
+      "[Queued messages while agent was busy]",
+      "Conversation info (untrusted metadata):",
+      "```json",
+      '{"message_id": "om_123"}',
+      "```",
+      "User: actual conversation content",
+    ].join("\n");
+
+    const result = stripEnvelopeMetadata(input);
+    assert.equal(result, "User: actual conversation content");
+    assert.doesNotMatch(result, /<<<EXTERNAL_UNTRUSTED_CONTENT/);
+    assert.doesNotMatch(result, /untrusted metadata/);
+    assert.doesNotMatch(result, /\[Queued messages while agent was busy\]/);
+    assert.doesNotMatch(result, /message_id/);
+  });
 });

@@ -10,7 +10,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { MemoryRetriever, RetrievalResult } from "./retriever.js";
 import type { MemoryStore } from "./store.js";
-import { isNoise } from "./noise-filter.js";
+import { isNoise, ENVELOPE_NOISE_PATTERNS } from "./noise-filter.js";
+import { stripEnvelopeMetadata } from "./smart-extractor.js";
 import { isSystemBypassId, resolveScopeFilter, parseAgentIdFromSessionKey, type MemoryScopeManager } from "./scopes.js";
 import type { Embedder } from "./embedder.js";
 import {
@@ -695,6 +696,20 @@ export function registerMemoryStoreTool(
         };
 
         try {
+          // Guard: strip envelope metadata first, reject only if nothing remains (P2 fix)
+          const stripped = stripEnvelopeMetadata(text);
+          if (!stripped.trim()) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: "Skipped: text is purely envelope metadata with no extractable memory content.",
+                },
+              ],
+              details: { action: "envelope_metadata_rejected", text: text.slice(0, 60) },
+            };
+          }
+
           const agentId = runtimeContext.agentId;
           // Determine target scope
           let targetScope = scope;

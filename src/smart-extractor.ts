@@ -1,8 +1,8 @@
 /**
- * Smart Memory Extractor — LLM-powered extraction pipeline
+ * Smart Memory Extractor ??LLM-powered extraction pipeline
  * Replaces regex-triggered capture with intelligent 6-category extraction.
  *
- * Pipeline: conversation → LLM extract → candidates → dedup → persist
+ * Pipeline: conversation ??LLM extract ??candidates ??dedup ??persist
  *
  */
 
@@ -71,13 +71,43 @@ import { batchDedup } from "./batch-dedup.js";
  */
 export function stripEnvelopeMetadata(text: string): string {
   // 0. Strip runtime orchestration wrappers that should never become memories
-  //    (sub-agent task scaffolding is execution metadata, not conversation content).
-  let cleaned = text.replace(
-    /^\[(?:Subagent Context|Subagent Task)\]\s*(?:You are running as a subagent.*?(?:$|(?<=\.)\s+)|Results auto-announce to your requester\.?\s*|do not busy-poll for status\.?\s*|Reply with a brief acknowledgment only\.?\s*|Do not use any memory tools\.?\s*)?/gim,
+  let cleaned = text.replace(/^\[(?:Subagent Context|Subagent Task)\].*$/gm, "");
+  cleaned = cleaned.replace(
+    /^(?:Results auto-announce to your requester\.?|do not busy-poll for status\.?|Do not use any memory tools\.?)\s*$/gim,
+    "",
+  );
+
+  // 0b. Strip Discord/channel forwarded message envelope blocks
+  cleaned = cleaned.replace(
+    /^<<<EXTERNAL_UNTRUSTED_CONTENT\b.*$/gim,
     "",
   );
   cleaned = cleaned.replace(
-    /^(?:Results auto-announce to your requester\.?|do not busy-poll for status\.?|Do not use any memory tools\.?)\s*$/gim,
+    /^<<<END_EXTERNAL_UNTRUSTED_CONTENT\b.*$/gim,
+    "",
+  );
+
+  // 0c. Strip individual envelope metadata header lines (per-line, no blanket null return)
+  cleaned = cleaned.replace(
+    /^Sender\s*\(untrusted metadata\):\s*\n```json\n[\s\S]*?\n```\s*/gim,
+    "",
+  );
+  cleaned = cleaned.replace(
+    /^Conversation info\s*\(untrusted metadata\):\s*\n```json\n[\s\S]*?\n```\s*/gim,
+    "",
+  );
+  // Thread starter: consume header + content + trailing blank lines (not just the content line)
+  cleaned = cleaned.replace(
+    /^Thread starter\s*\(untrusted, for context\):\n([^\n]*\n[ \t]*)*\n+/gm,
+    "",
+  );
+  // Forwarded message context: same pattern ??header + content + trailing blank lines
+  cleaned = cleaned.replace(
+    /^Forwarded message context\s*\(untrusted metadata\):\n([^\n]*\n[ \t]*)*\n+/gm,
+    "",
+  );
+  cleaned = cleaned.replace(
+    /^\[Queued messages while agent was busy\]\s*/gim,
     "",
   );
 
@@ -223,7 +253,7 @@ export class SmartExtractor {
 
     if (candidates.length === 0) {
       this.log("memory-pro: smart-extractor: no memories extracted");
-      // LLM returned zero candidates → strongest noise signal → feedback to noise bank
+      // LLM returned zero candidates ??strongest noise signal ??feedback to noise bank
       this.learnAsNoise(conversationText);
       return stats;
     }
@@ -232,7 +262,7 @@ export class SmartExtractor {
       `memory-pro: smart-extractor: extracted ${candidates.length} candidate(s)`,
     );
 
-    // Step 1b: Batch-internal dedup — embed candidate abstracts and remove near-duplicates
+    // Step 1b: Batch-internal dedup ??embed candidate abstracts and remove near-duplicates
     //          before expensive per-candidate LLM dedup calls (see src/batch-dedup.ts)
     const capped = candidates.slice(0, MAX_MEMORIES_PER_EXTRACTION);
     let survivingCandidates = capped;
@@ -305,11 +335,14 @@ export class SmartExtractor {
    */
   async filterNoiseByEmbedding(texts: string[]): Promise<string[]> {
     const noiseBank = this.config.noiseBank;
+
+    }
+
     if (!noiseBank || !noiseBank.initialized) return texts;
 
     const result: string[] = [];
     for (const text of texts) {
-      // Very short texts lack semantic signal — skip noise check to avoid false positives
+      // Very short texts lack semantic signal ??skip noise check to avoid false positives
       if (text.length <= 8) {
         result.push(text);
         continue;
@@ -329,7 +362,7 @@ export class SmartExtractor {
           );
         }
       } catch {
-        // Embedding failed — pass text through
+        // Embedding failed ??pass text through
         result.push(text);
       }
     }
@@ -352,7 +385,7 @@ export class SmartExtractor {
         this.debugLog("memory-lancedb-pro: smart-extractor: learned noise from zero-extraction");
       }
     } catch {
-      // Non-critical — silently skip
+      // Non-critical ??silently skip
     }
   }
 
@@ -463,7 +496,7 @@ export class SmartExtractor {
   // --------------------------------------------------------------------------
 
   /**
-   * Process a single candidate memory: dedup → merge/create → store
+   * Process a single candidate memory: dedup ??merge/create ??store
    */
   private async processCandidate(
     candidate: CandidateMemory,
@@ -473,7 +506,7 @@ export class SmartExtractor {
     targetScope: string,
     scopeFilter?: string[],
   ): Promise<void> {
-    // Profile always merges (skip dedup — admission control still applies)
+    // Profile always merges (skip dedup ??admission control still applies)
     if (ALWAYS_MERGE_CATEGORIES.has(candidate.category)) {
       const profileResult = await this.handleProfileMerge(
         candidate,
@@ -515,7 +548,7 @@ export class SmartExtractor {
     if (admission?.decision === "reject") {
       stats.rejected = (stats.rejected ?? 0) + 1;
       this.log(
-        `memory-pro: smart-extractor: admission rejected [${candidate.category}] ${candidate.abstract.slice(0, 60)} — ${admission.audit.reason}`,
+        `memory-pro: smart-extractor: admission rejected [${candidate.category}] ${candidate.abstract.slice(0, 60)} ??${admission.audit.reason}`,
       );
       await this.recordRejectedAdmission(
         candidate,
@@ -552,7 +585,7 @@ export class SmartExtractor {
           );
           stats.merged++;
         } else {
-          // Category doesn't support merge → create instead
+          // Category doesn't support merge ??create instead
           await this.storeCandidate(candidate, vector, sessionKey, targetScope, admission?.audit);
           stats.created++;
         }
@@ -641,14 +674,14 @@ export class SmartExtractor {
   // --------------------------------------------------------------------------
 
   /**
-   * Two-stage dedup: vector similarity search → LLM decision.
+   * Two-stage dedup: vector similarity search ??LLM decision.
    */
   private async deduplicate(
     candidate: CandidateMemory,
     candidateVector: number[],
     scopeFilter?: string[],
   ): Promise<DedupResult> {
-    // Stage 1: Vector pre-filter — find similar active memories.
+    // Stage 1: Vector pre-filter ??find similar active memories.
     // excludeInactive ensures the store over-fetches to fill N active slots,
     // preventing superseded history from crowding out the current fact.
     const activeSimilar = await this.store.vectorSearch(
@@ -663,9 +696,9 @@ export class SmartExtractor {
       return { decision: "create", reason: "No similar memories found" };
     }
 
-    // Stage 1.5: Preference slot guard — same brand but different item
+    // Stage 1.5: Preference slot guard ??same brand but different item
     // should always be stored as a new memory, not merged/skipped.
-    // Example: "喜欢麦当劳的板烧鸡腿堡" and "喜欢麦当劳的麦辣鸡翅" are
+    // Example: "?�欢麦�??��??�烧鸡腿?? and "?�欢麦�??��?麦辣鸡�?" are
     // different preferences even though they share the same brand.
     if (candidate.category === "preferences") {
       const candidateSlot = inferAtomicBrandItemPreferenceSlot(candidate.content);
@@ -674,7 +707,7 @@ export class SmartExtractor {
           const existingSlot = inferAtomicBrandItemPreferenceSlot(r.entry.text);
           // If existing is not a brand-item preference, let LLM decide
           if (!existingSlot) return false;
-          // Same brand, different item → should not be deduped
+          // Same brand, different item ??should not be deduped
           return existingSlot.brand === candidateSlot.brand && existingSlot.item !== candidateSlot.item;
         });
         if (allDifferentItem) {
@@ -743,7 +776,7 @@ export class SmartExtractor {
         : topSimilar[0];
 
       // For destructive decisions (supersede), missing match_index is
-      // unsafe — we could invalidate the wrong memory. Degrade to create.
+      // unsafe ??we could invalidate the wrong memory. Degrade to create.
       const destructiveDecisions = new Set(["supersede", "contradict"]);
       if (destructiveDecisions.has(decision) && !hasValidIndex) {
         this.log(
@@ -798,7 +831,7 @@ export class SmartExtractor {
       });
       if (profileAdmission.decision === "reject") {
         this.log(
-          `memory-pro: smart-extractor: admission rejected profile [${candidate.abstract.slice(0, 60)}] — ${profileAdmission.audit.reason}`,
+          `memory-pro: smart-extractor: admission rejected profile [${candidate.abstract.slice(0, 60)}] ??${profileAdmission.audit.reason}`,
         );
         await this.recordRejectedAdmission(candidate, conversationText, sessionKey, targetScope, scopeFilter ?? [targetScope], profileAdmission.audit as AdmissionAuditRecord & { decision: "reject" });
         return "rejected";
@@ -833,7 +866,7 @@ export class SmartExtractor {
       );
       return "merged";
     } else {
-      // No existing profile — create new
+      // No existing profile ??create new
       await this.storeCandidate(candidate, vector || [], sessionKey, targetScope, admissionAudit);
       return "created";
     }
@@ -1064,7 +1097,7 @@ export class SmartExtractor {
     );
 
     this.log(
-      `memory-pro: smart-extractor: support [${contextLabel || "general"}] on ${matchId.slice(0, 8)} — ${reason}`,
+      `memory-pro: smart-extractor: support [${contextLabel || "general"}] on ${matchId.slice(0, 8)} ??${reason}`,
     );
   }
 
