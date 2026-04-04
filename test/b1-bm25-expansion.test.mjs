@@ -27,7 +27,25 @@ function createMockApi() {
 }
 
 describe("expandDerivedWithBm25", () => {
-  describe("D1: seen = new Set() empty init", () => {
+  describe("D1: dedupe neighbors against derived (self-match guard)", () => {
+    it("should exclude non-reflection neighbors that match original derived text", async () => {
+      // A non-reflection memory entry whose text is identical to a derived line
+      // should be excluded from neighbors — it is a reflection mirror/duplicate.
+      const store = createMockStore([
+        { entry: { id: "mirror1", text: "derived 1", category: "fact", scope: "global" } },
+        { entry: { id: "mirror2", text: "derived 2", category: "note", scope: "global" } },
+        { entry: { id: "genuine", text: "genuine neighbor fact", category: "fact", scope: "global" } },
+      ]);
+      const api = createMockApi();
+      const derived = ["derived 1", "derived 2", "derived 3"];
+      const result = await expandDerivedWithBm25(derived, ["global"], store, api);
+      // The two mirror entries must not appear — they match derived lines
+      assert.ok(!result.includes("derived 1"), "Mirror of derived 1 must not appear");
+      assert.ok(!result.includes("derived 2"), "Mirror of derived 2 must not appear");
+      // Genuine neighbor should still be included
+      assert.ok(result.includes("genuine neighbor fact"), "Genuine neighbor should appear");
+    });
+
     it("should not deduplicate neighbors from different derived lines if text differs", async () => {
       const store = createMockStore([
         { entry: { id: "1", text: "neighbor A", category: "fact", scope: "global" } },
@@ -35,7 +53,7 @@ describe("expandDerivedWithBm25", () => {
       ]);
       const api = createMockApi();
       const result = await expandDerivedWithBm25(["derived1", "derived2"], ["global"], store, api);
-      assert.ok(result.length >= 2);
+      assert.ok(result.length >= 2, "Neighbors with different text should both appear");
     });
   });
 
@@ -156,6 +174,73 @@ describe("expandDerivedWithBm25", () => {
     });
   });
 
+  describe("Bug fixes", () => {
+    describe("Bug C: empty / whitespace-only neighbor text must be excluded", () => {
+      it("should skip neighbor text that is empty string", async () => {
+        const store = createMockStore([
+          { entry: { id: "n1", text: "", category: "fact", scope: "global" } },
+          { entry: { id: "n2", text: "valid text", category: "fact", scope: "global" } },
+        ]);
+        const api = createMockApi();
+        const result = await expandDerivedWithBm25(["derived1"], ["global"], store, api);
+        assert.ok(!result.includes(""), "Empty string must not appear in neighbors");
+        assert.ok(result.includes("valid text"), "Valid text should appear");
+      });
+
+      it("should skip neighbor text that is whitespace-only", async () => {
+        const store = createMockStore([
+          { entry: { id: "n1", text: "   \t\n  ", category: "fact", scope: "global" } },
+          { entry: { id: "n2", text: "valid neighbor", category: "fact", scope: "global" } },
+        ]);
+        const api = createMockApi();
+        const result = await expandDerivedWithBm25(["derived1"], ["global"], store, api);
+        assert.ok(!result.some((t) => t.trim() === ""), "Whitespace-only string must not appear in neighbors");
+        assert.ok(result.includes("valid neighbor"), "Valid neighbor should appear");
+      });
+
+      it("should skip neighbor text that is only whitespace after first-line truncation", async () => {
+        // entry.text is "\n   " — first line is empty after split
+        const store = createMockStore([
+          { entry: { id: "n1", text: "\n   second line", category: "fact", scope: "global" } },
+        ]);
+        const api = createMockApi();
+        const result = await expandDerivedWithBm25(["derived1"], ["global"], store, api);
+        assert.ok(result.every((t) => t.trim() !== ""), "No empty/whitespace-only items should appear");
+      });
+    });
+
+    describe("Bug D: non-reflection copy of derived text must be excluded (self-match dedup)", () => {
+      it("should exclude non-reflection entry that exactly matches a derived line", async () => {
+        const store = createMockStore([
+          // This is a non-reflection memory that happens to contain the same text
+          // as a derived line from a reflection entry. It should not appear as neighbor.
+          { entry: { id: "mirror", text: "derived line content", category: "note", scope: "global" } },
+          { entry: { id: "fact1", text: "some other fact", category: "fact", scope: "global" } },
+        ]);
+        const api = createMockApi();
+        const derived = ["derived line content", "another derived line"];
+        const result = await expandDerivedWithBm25(derived, ["global"], store, api);
+        assert.ok(!result.includes("derived line content"), "Non-reflection mirror of derived must be excluded");
+        assert.ok(result.includes("some other fact"), "Unrelated facts should appear");
+      });
+
+      it("should exclude non-reflection entry that matches derived after first-line truncation", async () => {
+        // Long derived line truncated to 120 chars — a non-reflection entry
+        // with the same 120-char prefix should still be excluded.
+        const prefix = "x".repeat(120);
+        const store = createMockStore([
+          { entry: { id: "mirror", text: prefix + " extra detail not shown in first 120", category: "fact", scope: "global" } },
+          { entry: { id: "unique", text: "unique neighbor fact", category: "fact", scope: "global" } },
+        ]);
+        const api = createMockApi();
+        const derived = [prefix];
+        const result = await expandDerivedWithBm25(derived, ["global"], store, api);
+        assert.ok(!result.includes(prefix + " extra detail not shown in first 120"), "Mirror entry with same 120-char prefix must be excluded");
+        assert.ok(result.includes("unique neighbor fact"), "Unrelated neighbor should appear");
+      });
+    });
+  });
+
   describe("Edge cases", () => {
     it("should return empty array unchanged", async () => {
       const store = createMockStore([]);
@@ -193,7 +278,7 @@ describe("expandDerivedWithBm25", () => {
       const api = createMockApi();
       const derived = ["derived A", "derived B"];
       const result = await expandDerivedWithBm25(derived, ["global"], store, api);
-      assert.deepStrictEqual(result, ["derived A", "derived B"]);
+      assert.deepStrictEqual(result, derived);
     });
 
     it("should handle bm25Search returning fewer than 2 hits per query", async () => {
@@ -254,13 +339,14 @@ describe("expandDerivedWithBm25", () => {
       ]);
       const api = createMockApi();
       const result = await expandDerivedWithBm25(["derived1"], ["global"], store, api);
-      // null → "" (OR guard) → "" after split → pushed to neighbors
-      // undefined entry → hit.entry is undefined → reflection filter skips
+      // null → "" → (empty guard) excluded
+      // undefined entry → hit.entry is undefined → reflection filter skips, empty guard skips
       // valid text → "valid text"
-      const emptyCount = result.filter(t => t === "").length;
-      assert.equal(emptyCount, 1, `Expected 1 empty string from null, got ${emptyCount}`);
+      const emptyCount = result.filter((t) => t === "").length;
+      assert.equal(emptyCount, 0, `Expected 0 empty strings (null now filtered), got ${emptyCount}`);
       assert.ok(result.includes("valid text"), "valid text should be preserved");
-      assert.equal(result.length, 3, `Expected 3 items, got ${result.length}`);
+      // n1 (null) and n2 (undefined→empty) are both excluded
+      assert.equal(result.length, 1, `Expected 1 valid item, got ${result.length}`);
     });
 
     it("should dedupe by text snippet, not by entry.id", async () => {
@@ -273,7 +359,7 @@ describe("expandDerivedWithBm25", () => {
       const result = await expandDerivedWithBm25(["derived1"], ["global"], store, api);
       const firstResult = result[0];
       assert.ok(firstResult.startsWith(samePrefix));
-      const count = result.filter(t => t.startsWith(samePrefix)).length;
+      const count = result.filter((t) => t.startsWith(samePrefix)).length;
       assert.equal(count, 1, "Two entries with same 120-char prefix should be deduped to 1");
     });
   });
