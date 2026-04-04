@@ -1613,6 +1613,12 @@ const pluginVersion = getPluginVersion();
 // Plugin Definition
 // ============================================================================
 
+// WeakSet keyed by API instance — each distinct API object tracks its own initialized state.
+// Using WeakSet instead of a module-level boolean avoids the "second register() call skips
+// hook/tool registration for the new API instance" regression that rwmjhb identified.
+const _registeredApis = new WeakSet<OpenClawPluginApi>();
+
+// Tracks whether register() has ever completed successfully (for retry after failure)
 let _initialized = false;
 
 const memoryLanceDBProPlugin = {
@@ -1624,30 +1630,30 @@ const memoryLanceDBProPlugin = {
 
   register(api: OpenClawPluginApi) {
 
-    // Idempotent guard: skip re-init on repeated register() calls
-    if (_initialized) {
-      api.logger.debug("memory-lancedb-pro: register() called again — skipping re-init (idempotent)");
+    // Idempotent guard: skip re-init if this exact API instance has already registered.
+    if (_registeredApis.has(api)) {
+      api.logger.debug?.("memory-lancedb-pro: register() called again — skipping re-init (idempotent)");
       return;
     }
-    _initialized = true;
 
     // Parse and validate configuration
     const config = parsePluginConfig(api.pluginConfig);
 
-    const resolvedDbPath = api.resolvePath(config.dbPath || getDefaultDbPath());
-
-    // Pre-flight: validate storage path (symlink resolution, mkdir, write check).
-    // Runs synchronously and logs warnings; does NOT block gateway startup.
     try {
-      validateStoragePath(resolvedDbPath);
-    } catch (err) {
-      api.logger.warn(
-        `memory-lancedb-pro: storage path issue — ${String(err)}\n` +
-        `  The plugin will still attempt to start, but writes may fail.`,
-      );
-    }
+      const resolvedDbPath = api.resolvePath(config.dbPath || getDefaultDbPath());
 
-    const vectorDim = getVectorDimensions(
+      // Pre-flight: validate storage path (symlink resolution, mkdir, write check).
+      // Runs synchronously and logs warnings; does NOT block gateway startup.
+      try {
+        validateStoragePath(resolvedDbPath);
+      } catch (err) {
+        api.logger.warn(
+          `memory-lancedb-pro: storage path issue — ${String(err)}\n` +
+          `  The plugin will still attempt to start, but writes may fail.`,
+        );
+      }
+
+      const vectorDim = getVectorDimensions(
       config.embedding.model || "text-embedding-3-small",
       config.embedding.dimensions,
     );
@@ -3739,7 +3745,17 @@ const memoryLanceDBProPlugin = {
         api.logger.info("memory-lancedb-pro: stopped");
       },
     });
-  },
+    } // end try — all initialization succeeded
+
+    // All initialization completed successfully: mark success.
+    _initialized = true;
+    _registeredApis.add(api);
+  } catch (err) {
+    // init 失敗：_initialized 仍為 false，下次不同 instance 可重試
+    // WeakSet 沒加入，該 instance 不會被錯誤 block
+    throw err;
+  }
+},
 };
 
 export function parsePluginConfig(value: unknown): PluginConfig {
@@ -3999,6 +4015,14 @@ export function parsePluginConfig(value: unknown): PluginConfig {
   };
 }
 
-export function _resetInitialized() { _initialized = false; }
+export function resetRegistration() {
+  // Note: WeakSets cannot be cleared by design. In test scenarios where the
+  // same process reloads the module, a fresh module state means a new WeakSet.
+  // For hot-reload scenarios, the module is re-imported fresh.
+  _registeredApis.clear();
+  _initialized = false;
+}
+
+export function _resetInitialized() { resetRegistration(); }  // backward alias
 
 export default memoryLanceDBProPlugin;
