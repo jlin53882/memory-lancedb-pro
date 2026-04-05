@@ -145,8 +145,10 @@ export function stripEnvelopeMetadata(text: string): string {
   // Returns true if ALL remaining non-blank lines after idx are boilerplate
   // (wrapper zone not yet exited). Returns false if at least one non-blank,
   // non-boilerplate line exists (wrapper zone exited — don't strip).
+  // Returns true if ALL non-blank lines from current idx onwards are boilerplate
+  // (still in wrapper zone). Returns false if at least one is real user content.
   const isStillInWrapperZone = (idx: number): boolean => {
-    for (let i = idx + 1; i < lines.length; i++) {
+    for (let i = idx; i < lines.length; i++) {
       const t = lines[i].trim();
       if (!t) continue; // skip blank lines
       if (
@@ -154,7 +156,7 @@ export function stripEnvelopeMetadata(text: string): string {
       ) {
         continue; // still in wrapper zone — keep scanning
       }
-      // Found a real non-blank, non-boilerplate line — wrapper zone is gone
+      // Found a real non-blank, non-boilerplate line — wrapper zone has ended
       return false;
     }
     return true; // nothing but boilerplate and blanks found
@@ -172,13 +174,11 @@ export function stripEnvelopeMetadata(text: string): string {
     ) {
       return ""; // strip — this is wrapper continuation, not user text
     }
-    // Case B: known boilerplate phrases on their own line
-    //         (only strip when no user content follows)
-    if (
-      /^(?:Results auto-announce to your requester\.?|do not busy-poll for status\.?|Reply with a brief acknowledgment only\.?|Do not use any memory tools\.?)$/i.test(trimmed) &&
-      isStillInWrapperZone(i)
-    ) {
-      return ""; // strip
+    // Case B: known boilerplate phrases — strip when still inside wrapper zone
+    //         (boilerplate lines that appear after wrapper but before any real user content)
+    const isBoilerplate = /^(?:Results auto-announce to your requester\.?|do not busy-poll for status\.?|Reply with a brief acknowledgment only\.?|Do not use any memory tools\.?)$/i.test(trimmed);
+    if (isBoilerplate && isStillInWrapperZone(i)) {
+      return ""; // strip boilerplate lines as long as wrapper zone hasn't ended
     }
     return line;
   });
