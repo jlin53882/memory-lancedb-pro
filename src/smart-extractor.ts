@@ -151,9 +151,13 @@ export function stripEnvelopeMetadata(text: string): string {
     const prevTrimmed = i > 0 ? lines[i - 1].trim() : "";
 
     // A stripped wrapper line from Step 1: prev line will be ""
-    // This means we've entered (or are inside) the wrapper zone
-    const isPrevStripped = prevTrimmed === "";
+    // (only meaningful when i > 0; first line has no prev)
+    const isPrevStripped = i > 0 && prevTrimmed === "";
     const isBoilerplate = BOILERPLATE_RE.test(trimmed);
+    // If the previous line was stripped by Step 1, we're in the wrapper zone
+    if (isPrevStripped) {
+      inWrapperZone = true;
+    }
 
     // Case A: "You are running as a subagent..." on its own line,
     //         immediately following a [Subagent Context/Task] wrapper prefix line.
@@ -176,8 +180,6 @@ export function stripEnvelopeMetadata(text: string): string {
       inWrapperZone = false;
     }
 
-    return line;
-  });
     return line;
   });
   cleaned = strippedLines.join("\n");
