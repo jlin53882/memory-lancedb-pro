@@ -142,32 +142,42 @@ export function stripEnvelopeMetadata(text: string): string {
   //    Case B: standalone boilerplate phrases — only strip when still in wrapper zone.
   const lines = cleaned.split("\n");
   const BOILERPLATE_RE = /^(?:Results auto-announce to your requester\.?|do not busy-poll for status\.?|Reply with a brief acknowledgment only\.?|Do not use any memory tools\.?)$/i;
-  // Wrapper zone: set to true when we see an empty line (Step 1 stripped a wrapper prefix),
-  // or when we encounter a boilerplate line while already in the zone.
-  // Reset to false when we encounter real user content.
+  // inWrapperZone: true when Step 1 just stripped a wrapper line (empty prev line).
+  // While in wrapper zone, strip boilerplate continuation lines.
+  // Exit wrapper zone when we encounter real user content (non-blank, non-boilerplate, not a wrapper line).
   let inWrapperZone = false;
   const strippedLines = lines.map((line, i) => {
     const trimmed = line.trim();
     const prevTrimmed = i > 0 ? lines[i - 1].trim() : "";
+
+    // A stripped wrapper line from Step 1: prev line will be ""
+    // This means we've entered (or are inside) the wrapper zone
+    const isPrevStripped = prevTrimmed === "";
+    const isBoilerplate = BOILERPLATE_RE.test(trimmed);
+
     // Case A: "You are running as a subagent..." on its own line,
     //         immediately following a [Subagent Context/Task] wrapper prefix line.
-    //         Step 1 stripped the wrapper line, so prevTrimmed will be "".
     if (
       /You are running as a subagent\b/i.test(trimmed) &&
-      prevTrimmed === ""
+      isPrevStripped
     ) {
       inWrapperZone = true;
       return ""; // strip
     }
-    // Case B: known boilerplate phrases — strip only when in wrapper zone
-    const isBoilerplate = BOILERPLATE_RE.test(trimmed);
+
+    // Case B: boilerplate lines — strip while in wrapper zone
     if (isBoilerplate && inWrapperZone) {
-      return ""; // strip boilerplate while in wrapper zone
+      return ""; // strip boilerplate continuation while in wrapper zone
     }
-    // Non-blank, non-boilerplate, non-wrapper content — exit wrapper zone
+
+    // Real user content (non-blank, non-boilerplate, not a wrapper line):
+    // exit wrapper zone
     if (trimmed !== "" && !isBoilerplate) {
       inWrapperZone = false;
     }
+
+    return line;
+  });
     return line;
   });
   cleaned = strippedLines.join("\n");
