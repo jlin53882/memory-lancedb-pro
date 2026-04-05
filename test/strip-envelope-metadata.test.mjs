@@ -142,6 +142,45 @@ describe("stripEnvelopeMetadata", () => {
     assert.equal(result, "Actual user content starts here.");
   });
 
+  // rwmjhb Must Fix #1: "Reply with a brief acknowledgment only." on its own line
+  // followed by user content — must still be stripped (boilerplate, not user text)
+  it("strips standalone Reply-with-ack line when followed by user content", () => {
+    const input = [
+      "[Subagent Task] Reply with a brief acknowledgment only.",
+      "Actual user content starts here.",
+    ].join("\n");
+
+    const result = stripEnvelopeMetadata(input);
+    assert.equal(result, "Actual user content starts here.");
+  });
+
+  // rwmjhb Nice to Have #2: multiline wrapper where "You are running as a subagent..."
+  // appears on a separate line after [Subagent Context] prefix — must be stripped
+  it("strips multiline wrapper with 'You are running as a subagent' on separate line", () => {
+    const input = [
+      "[Subagent Context]",
+      "You are running as a subagent (depth 1/1).",
+      "Results auto-announce to your requester.",
+      "Actual user content starts here.",
+    ].join("\n");
+
+    const result = stripEnvelopeMetadata(input);
+    assert.equal(result, "Actual user content starts here.");
+  });
+
+  // Do-not-false-positive: legitimate user text that happens to match a boilerplate
+  // phrase — must NOT be stripped when followed by user content
+  it("preserves legitimate user text that matches boilerplate phrases", () => {
+    const input = [
+      "Do not use any memory tools.",
+      "I need you to remember my preferences.",
+    ].join("\n");
+
+    const result = stripEnvelopeMetadata(input);
+    assert.match(result, /Do not use any memory tools/);
+    assert.match(result, /I need you to remember my preferences/);
+  });
+
   it("handles Telegram-style envelope headers", () => {
     const input = [
       "System: [2026-03-18 14:21:36 GMT+8] Telegram[bot123] DM | user_456 [msg:12345]",
