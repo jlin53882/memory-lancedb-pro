@@ -135,29 +135,46 @@ export function stripEnvelopeMetadata(text: string): string {
     /^\[(?:Subagent Context|Subagent Task)\].*/gim,
     "",
   );
-  //    Step 2: strip standalone boilerplate continuation lines that appear on their own
-  //    (these are continuation of the wrapper, not user content).
-  //    Only strip when NOT preceded by a non-empty, non-wrapper user content line
-  //    to avoid regressing legitimate user text like "Do not use any memory tools.".
+  //    Step 2: strip continuation lines that appear after a wrapper prefix line
+  //    (multiline wrapper fragments, not user content).
+  //    Case A: "You are running as a subagent..." on its own line following a
+  //    [Subagent Context/Task] wrapper prefix — strip it (Nice to Have #2).
+  //    Case B: standalone boilerplate phrases — only strip when NOT followed by
+  //    user content, to avoid false-positive stripping of legitimate user text.
   const lines = cleaned.split("\n");
   const isFollowedByUserContent = (idx: number): boolean => {
     for (let i = idx + 1; i < lines.length; i++) {
       const t = lines[i].trim();
       if (!t) continue; // skip blank lines
-      // If the next non-blank line doesn't look like boilerplate, it's user content
-      if (!/^(?:Results auto-announce|do not busy-poll|Reply with a brief acknowledgment|Do not use any memory tools)\b/i.test(t)) {
-        return true;
+      // If this non-blank line is boilerplate, keep looking past it
+      if (/^(?:Results auto-announce|do not busy-poll|Reply with a brief acknowledgment|Do not use any memory tools)\b/i.test(t)) {
+        continue; // not user content yet — keep scanning
       }
+      // Found a real non-boilerplate, non-blank line — it's user content
+      return true;
     }
-    return false;
+    return false; // nothing but boilerplate and blanks found
   };
   const strippedLines = lines.map((line, i) => {
     const trimmed = line.trim();
+    const prevTrimmed = i > 0 ? lines[i - 1].trim() : "";
+    // Case A: "You are running as a subagent..." on its own line,
+    //         immediately following a [Subagent Context/Task] wrapper prefix line.
+    //         Step 1 already stripped the wrapper line, so prevTrimmed will be "".
+    //         This is a multiline wrapper fragment — strip it.
+    if (
+      /You are running as a subagent\b/i.test(trimmed) &&
+      prevTrimmed === ""  // prev line is empty = Step 1 stripped a wrapper prefix line
+    ) {
+      return ""; // strip — this is wrapper continuation, not user text
+    }
+    // Case B: known boilerplate phrases on their own line
+    //         (only strip when no user content follows)
     if (
       /^(?:Results auto-announce to your requester\.?|do not busy-poll for status\.?|Reply with a brief acknowledgment only\.?|Do not use any memory tools\.?)$/i.test(trimmed) &&
       !isFollowedByUserContent(i)
     ) {
-      return ""; // strip this boilerplate line
+      return ""; // strip
     }
     return line;
   });
