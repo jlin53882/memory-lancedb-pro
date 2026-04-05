@@ -139,46 +139,34 @@ export function stripEnvelopeMetadata(text: string): string {
   //    (multiline wrapper fragments, not user content).
   //    Case A: "You are running as a subagent..." on its own line following a
   //    [Subagent Context/Task] wrapper prefix — strip it (Nice to Have #2).
-  //    Case B: standalone boilerplate phrases — only strip when NOT followed by
-  //    user content, to avoid false-positive stripping of legitimate user text.
+  //    Case B: standalone boilerplate phrases — only strip when still in wrapper zone.
   const lines = cleaned.split("\n");
-  // Returns true if ALL remaining non-blank lines after idx are boilerplate
-  // (wrapper zone not yet exited). Returns false if at least one non-blank,
-  // non-boilerplate line exists (wrapper zone exited — don't strip).
-  // Returns true if ALL non-blank lines from current idx onwards are boilerplate
-  // (still in wrapper zone). Returns false if at least one is real user content.
-  const isStillInWrapperZone = (idx: number): boolean => {
-    for (let i = idx; i < lines.length; i++) {
-      const t = lines[i].trim();
-      if (!t) continue; // skip blank lines
-      if (
-        /^(?:Results auto-announce to your requester\.?|do not busy-poll for status\.?|Reply with a brief acknowledgment only\.?|Do not use any memory tools\.?)$/i.test(t)
-      ) {
-        continue; // still in wrapper zone — keep scanning
-      }
-      // Found a real non-blank, non-boilerplate line — wrapper zone has ended
-      return false;
-    }
-    return true; // nothing but boilerplate and blanks found
-  };
+  const BOILERPLATE_RE = /^(?:Results auto-announce to your requester\.?|do not busy-poll for status\.?|Reply with a brief acknowledgment only\.?|Do not use any memory tools\.?)$/i;
+  // Wrapper zone: set to true when we see an empty line (Step 1 stripped a wrapper prefix),
+  // or when we encounter a boilerplate line while already in the zone.
+  // Reset to false when we encounter real user content.
+  let inWrapperZone = false;
   const strippedLines = lines.map((line, i) => {
     const trimmed = line.trim();
     const prevTrimmed = i > 0 ? lines[i - 1].trim() : "";
     // Case A: "You are running as a subagent..." on its own line,
     //         immediately following a [Subagent Context/Task] wrapper prefix line.
-    //         Step 1 already stripped the wrapper line, so prevTrimmed will be "".
-    //         This is a multiline wrapper fragment — strip it.
+    //         Step 1 stripped the wrapper line, so prevTrimmed will be "".
     if (
       /You are running as a subagent\b/i.test(trimmed) &&
-      prevTrimmed === ""  // prev line is empty = Step 1 stripped a wrapper prefix line
+      prevTrimmed === ""
     ) {
-      return ""; // strip — this is wrapper continuation, not user text
+      inWrapperZone = true;
+      return ""; // strip
     }
-    // Case B: known boilerplate phrases — strip when still inside wrapper zone
-    //         (boilerplate lines that appear after wrapper but before any real user content)
-    const isBoilerplate = /^(?:Results auto-announce to your requester\.?|do not busy-poll for status\.?|Reply with a brief acknowledgment only\.?|Do not use any memory tools\.?)$/i.test(trimmed);
-    if (isBoilerplate && isStillInWrapperZone(i)) {
-      return ""; // strip boilerplate lines as long as wrapper zone hasn't ended
+    // Case B: known boilerplate phrases — strip only when in wrapper zone
+    const isBoilerplate = BOILERPLATE_RE.test(trimmed);
+    if (isBoilerplate && inWrapperZone) {
+      return ""; // strip boilerplate while in wrapper zone
+    }
+    // Non-blank, non-boilerplate, non-wrapper content — exit wrapper zone
+    if (trimmed !== "" && !isBoilerplate) {
+      inWrapperZone = false;
     }
     return line;
   });
