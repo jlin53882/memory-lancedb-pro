@@ -128,7 +128,40 @@ function stripLeadingRuntimeWrappers(text: string): string {
 export function stripEnvelopeMetadata(text: string): string {
   // 0. Strip runtime orchestration wrappers that should never become memories
   //    (sub-agent task scaffolding is execution metadata, not conversation content).
-  let cleaned = stripLeadingRuntimeWrappers(text);
+  //    Step 1: strip entire wrapper lines (prefix + all inline content) so that
+  //    subagent instruction fragments like 'You are running as a subagent (depth 1/1).'
+  //    are not left behind when inline content does not match the old optional-group patterns.
+  let cleaned = text.replace(
+    /^\[(?:Subagent Context|Subagent Task)\].*/gim,
+    "",
+  );
+  //    Step 2: strip standalone boilerplate continuation lines that appear on their own
+  //    (these are continuation of the wrapper, not user content).
+  //    Only strip when NOT preceded by a non-empty, non-wrapper user content line
+  //    to avoid regressing legitimate user text like "Do not use any memory tools.".
+  const lines = cleaned.split("\n");
+  const isFollowedByUserContent = (idx: number): boolean => {
+    for (let i = idx + 1; i < lines.length; i++) {
+      const t = lines[i].trim();
+      if (!t) continue; // skip blank lines
+      // If the next non-blank line doesn't look like boilerplate, it's user content
+      if (!/^(?:Results auto-announce|do not busy-poll|Reply with a brief acknowledgment|Do not use any memory tools)\b/i.test(t)) {
+        return true;
+      }
+    }
+    return false;
+  };
+  const strippedLines = lines.map((line, i) => {
+    const trimmed = line.trim();
+    if (
+      /^(?:Results auto-announce to your requester\.?|do not busy-poll for status\.?|Reply with a brief acknowledgment only\.?|Do not use any memory tools\.?)$/i.test(trimmed) &&
+      !isFollowedByUserContent(i)
+    ) {
+      return ""; // strip this boilerplate line
+    }
+    return line;
+  });
+  cleaned = strippedLines.join("\n");
 
   // 1. Strip "System: [timestamp] Channel..." lines
   cleaned = cleaned.replace(
