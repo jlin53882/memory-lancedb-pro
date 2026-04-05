@@ -140,46 +140,41 @@ export function stripEnvelopeMetadata(text: string): string {
   //    Case A: "You are running as a subagent..." on its own line following a
   //    [Subagent Context/Task] wrapper prefix — strip it (Nice to Have #2).
   //    Case B: standalone boilerplate phrases — only strip when still in wrapper zone.
-  const lines = cleaned.split("\n");
   const BOILERPLATE_RE = /^(?:Results auto-announce to your requester\.?|do not busy-poll for status\.?|Reply with a brief acknowledgment only\.?|Do not use any memory tools\.?)$/i;
-  // inWrapperZone: true when Step 1 just stripped a wrapper line (empty prev line).
-  // While in wrapper zone, strip boilerplate continuation lines.
-  // Exit wrapper zone when we encounter real user content (non-blank, non-boilerplate, not a wrapper line).
+  const WRAPPER_LINE_RE = /^\[(?:Subagent Context|Subagent Task)\]/i;
+  // hadWrapperPrefix must be computed from the ORIGINAL text, not the Step-1-stripped
+  // text (Step 1 turns wrapper lines into "", so we can't detect them afterward).
+  const hadWrapperPrefix: boolean[] = text.split("\n").map((line) =>
+    WRAPPER_LINE_RE.test(line.trim())
+  );
+  // Once we detect a wrapper, stay in wrapper zone until we hit real user content.
+  // This handles multi-wrapper sequences where boilerplate lines follow stripped wrappers.
   let inWrapperZone = false;
+  const lines = cleaned.split("\n");
   const strippedLines = lines.map((line, i) => {
     const trimmed = line.trim();
-    const prevTrimmed = i > 0 ? lines[i - 1].trim() : "";
-
-    // A stripped wrapper line from Step 1: prev line will be ""
-    // (only meaningful when i > 0; first line has no prev)
-    const isPrevStripped = i > 0 && prevTrimmed === "";
     const isBoilerplate = BOILERPLATE_RE.test(trimmed);
-    // If the previous line was stripped by Step 1, we're in the wrapper zone
-    if (isPrevStripped) {
+    // Step 1 stripped the previous line → we are entering (or already in) wrapper zone
+    const prevHadWrapper = i > 0 && hadWrapperPrefix[i - 1];
+    if (prevHadWrapper) {
       inWrapperZone = true;
     }
-
     // Case A: "You are running as a subagent..." on its own line,
-    //         immediately following a [Subagent Context/Task] wrapper prefix line.
+    //         immediately following a Step-1-stripped wrapper prefix line.
     if (
       /You are running as a subagent\b/i.test(trimmed) &&
-      isPrevStripped
+      prevHadWrapper
     ) {
-      inWrapperZone = true;
       return ""; // strip
     }
-
-    // Case B: boilerplate lines — strip while in wrapper zone
+    // Case B: known boilerplate phrases — strip while in wrapper zone
     if (isBoilerplate && inWrapperZone) {
-      return ""; // strip boilerplate continuation while in wrapper zone
+      return ""; // strip
     }
-
-    // Real user content (non-blank, non-boilerplate, not a wrapper line):
-    // exit wrapper zone
+    // Real user content (non-blank, non-boilerplate): exit wrapper zone permanently
     if (trimmed !== "" && !isBoilerplate) {
       inWrapperZone = false;
     }
-
     return line;
   });
   cleaned = strippedLines.join("\n");
