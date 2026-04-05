@@ -142,18 +142,22 @@ export function stripEnvelopeMetadata(text: string): string {
   //    Case B: standalone boilerplate phrases — only strip when NOT followed by
   //    user content, to avoid false-positive stripping of legitimate user text.
   const lines = cleaned.split("\n");
-  const isFollowedByUserContent = (idx: number): boolean => {
+  // Returns true if ALL remaining non-blank lines after idx are boilerplate
+  // (wrapper zone not yet exited). Returns false if at least one non-blank,
+  // non-boilerplate line exists (wrapper zone exited — don't strip).
+  const isStillInWrapperZone = (idx: number): boolean => {
     for (let i = idx + 1; i < lines.length; i++) {
       const t = lines[i].trim();
       if (!t) continue; // skip blank lines
-      // If this non-blank line is boilerplate, keep looking past it
-      if (/^(?:Results auto-announce|do not busy-poll|Reply with a brief acknowledgment|Do not use any memory tools)\b/i.test(t)) {
-        continue; // not user content yet — keep scanning
+      if (
+        /^(?:Results auto-announce to your requester\.?|do not busy-poll for status\.?|Reply with a brief acknowledgment only\.?|Do not use any memory tools\.?)$/i.test(t)
+      ) {
+        continue; // still in wrapper zone — keep scanning
       }
-      // Found a real non-boilerplate, non-blank line — it's user content
-      return true;
+      // Found a real non-blank, non-boilerplate line — wrapper zone is gone
+      return false;
     }
-    return false; // nothing but boilerplate and blanks found
+    return true; // nothing but boilerplate and blanks found
   };
   const strippedLines = lines.map((line, i) => {
     const trimmed = line.trim();
@@ -172,7 +176,7 @@ export function stripEnvelopeMetadata(text: string): string {
     //         (only strip when no user content follows)
     if (
       /^(?:Results auto-announce to your requester\.?|do not busy-poll for status\.?|Reply with a brief acknowledgment only\.?|Do not use any memory tools\.?)$/i.test(trimmed) &&
-      !isFollowedByUserContent(i)
+      isStillInWrapperZone(i)
     ) {
       return ""; // strip
     }
