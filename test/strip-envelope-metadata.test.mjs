@@ -266,4 +266,49 @@ describe("stripEnvelopeMetadata", () => {
     // regex requires both message_id AND sender_id
     assert.match(result, /message_id/);
   });
+
+  // -----------------------------------------------------------------------
+  // Fix 1 regression tests: user content BEFORE boilerplate
+  // -----------------------------------------------------------------------
+  it("preserves boilerplate that appears BEFORE user content (user content first)", () => {
+    const input = [
+      "[Subagent Context]",
+      "User content first.",
+      "Results auto-announce to your requester.",
+    ].join("\n");
+
+    const result = stripEnvelopeMetadata(input);
+    // Boilerplate appears AFTER user content, so it's outside the leading zone
+    // and must be preserved
+    assert.equal(result, "User content first.\nResults auto-announce to your requester.");
+  });
+
+  // -----------------------------------------------------------------------
+  // Fix 3 regression tests: consecutive subagent content lines
+  // -----------------------------------------------------------------------
+  it("strips all consecutive subagent content lines in the leading zone", () => {
+    const input = [
+      "[Subagent Context]",
+      "You are running as a subagent (depth 1/1).",
+      "You are running as a subagent (depth 2/2).",
+      "Actual.",
+    ].join("\n");
+
+    const result = stripEnvelopeMetadata(input);
+    assert.equal(result, "Actual.");
+  });
+
+  // -----------------------------------------------------------------------
+  // Edge case: only wrapper + boilerplate, no user content at all
+  // -----------------------------------------------------------------------
+  it("strips everything when there is only wrapper and boilerplate with no user content", () => {
+    const input = [
+      "[Subagent Context]",
+      "You are running as a subagent (depth 1/1).",
+      "Results auto-announce to your requester.",
+    ].join("\n");
+
+    const result = stripEnvelopeMetadata(input);
+    assert.equal(result, "");
+  });
 });
