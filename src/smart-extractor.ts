@@ -126,58 +126,78 @@ function stripLeadingRuntimeWrappers(text: string): string {
  * - Standalone JSON blocks containing message_id/sender_id fields
  */
 export function stripEnvelopeMetadata(text: string): string {
-  // 0. Strip runtime orchestration wrappers that should never become memories
-  //    (sub-agent task scaffolding is execution metadata, not conversation content).
-  //    Step 1: strip entire wrapper lines (prefix + all inline content) so that
-  //    subagent instruction fragments like 'You are running as a subagent (depth 1/1).'
-  //    are not left behind when inline content does not match the old optional-group patterns.
-  let cleaned = text.replace(
-    /^\[(?:Subagent Context|Subagent Task)\].*/gim,
-    "",
-  );
-  //    Step 2: strip continuation lines that appear after a wrapper prefix line
-  //    (multiline wrapper fragments, not user content).
-  //    Case A: "You are running as a subagent..." on its own line following a
-  //    [Subagent Context/Task] wrapper prefix — strip it (Nice to Have #2).
-  //    Case B: standalone boilerplate phrases — only strip when still in wrapper zone.
+  // Matches wrapper lines: [Subagent Context] or [Subagent Task], possibly with
+  // inline content on the same line (e.g. "[Subagent Task] Reply with brief ack.").
+  // Also matches when the wrapper prefix is on its own line ("]\n" = no content after ]).
+  const WRAPPER_LINE_RE = /^\[(?:Subagent Context|Subagent Task)\](?:\s|$|\n)?/i;
   const BOILERPLATE_RE = /^(?:Results auto-announce to your requester\.?|do not busy-poll for status\.?|Reply with a brief acknowledgment only\.?|Do not use any memory tools\.?)$/i;
-  const WRAPPER_LINE_RE = /^\[(?:Subagent Context|Subagent Task)\]/i;
-  // hadWrapperPrefix must be computed from the ORIGINAL text, not the Step-1-stripped
-  // text (Step 1 turns wrapper lines into "", so we can't detect them afterward).
-  const hadWrapperPrefix: boolean[] = text.split("\n").map((line) =>
-    WRAPPER_LINE_RE.test(line.trim())
+  const SUBAGENT_RUNNING_RE = /You are running as a subagent\b/i;
+
+  const originalLines = text.split("\n");
+
+  // Pre-scan: determine if there are leading wrappers AND actual user content.
+  // Used to decide whether to strip boilerplate in the leading zone.
+  const hasLeadingWrapper = originalLines.some((rawLine) =>
+    WRAPPER_LINE_RE.test(rawLine.trim())
   );
-  // Once we detect a wrapper, stay in wrapper zone until we hit real user content.
-  // This handles multi-wrapper sequences where boilerplate lines follow stripped wrappers.
-  let inWrapperZone = false;
-  const lines = cleaned.split("\n");
-  const strippedLines = lines.map((line, i) => {
-    const trimmed = line.trim();
-    const isBoilerplate = BOILERPLATE_RE.test(trimmed);
-    // Step 1 stripped the previous line → we are entering (or already in) wrapper zone
-    const prevHadWrapper = i > 0 && hadWrapperPrefix[i - 1];
-    if (prevHadWrapper) {
-      inWrapperZone = true;
-    }
-    // Case A: "You are running as a subagent..." on its own line,
-    //         immediately following a Step-1-stripped wrapper prefix line.
-    if (
-      /You are running as a subagent\b/i.test(trimmed) &&
-      prevHadWrapper
-    ) {
-      return ""; // strip
-    }
-    // Case B: known boilerplate phrases — strip while in wrapper zone
-    if (isBoilerplate && inWrapperZone) {
-      return ""; // strip
-    }
-    // Real user content (non-blank, non-boilerplate): exit wrapper zone permanently
-    if (trimmed !== "" && !isBoilerplate) {
-      inWrapperZone = false;
-    }
-    return line;
+  const hasActualUserContent = originalLines.some((rawLine) => {
+    const trimmed = rawLine.trim();
+    return (
+      trimmed !== "" &&
+      !WRAPPER_LINE_RE.test(trimmed) &&
+      !BOILERPLATE_RE.test(trimmed)
+    );
   });
-  cleaned = strippedLines.join("\n");
+
+  // Single-pass state machine: find leading zone end and build result simultaneously.
+  // Key: "You are running as a subagent..." on its own line AFTER a wrapper prefix
+  // is wrapper CONTENT (must be stripped), not user content.
+  let stillInLeadingZone = true;
+  let prevWasWrapper = false;
+  const result: string[] = [];
+
+  for (let i = 0; i < originalLines.length; i++) {
+    const rawLine = originalLines[i];
+    const trimmed = rawLine.trim();
+    const isWrapper = WRAPPER_LINE_RE.test(trimmed);
+    const isBoilerplate = BOILERPLATE_RE.test(trimmed);
+    const isSubagentContent = prevWasWrapper && SUBAGENT_RUNNING_RE.test(trimmed);
+
+    if (isWrapper) {
+      prevWasWrapper = true;
+      stillInLeadingZone = true;
+      result.push(""); // strip wrapper
+      continue;
+    }
+
+    if (stillInLeadingZone) {
+      if (isBoilerplate) {
+        // Boilerplate in leading zone — strip if there are leading wrappers + user content
+        prevWasWrapper = false;
+        result.push(hasLeadingWrapper && hasActualUserContent ? "" : rawLine);
+        continue;
+      }
+
+      if (isSubagentContent) {
+        // Multiline wrapper: "You are running as a subagent..." on its own line
+        // after a wrapper prefix — strip it
+        prevWasWrapper = false;
+        result.push(""); // strip
+        continue;
+      }
+
+      // Real user content — exit the leading zone permanently
+      stillInLeadingZone = false;
+      prevWasWrapper = false;
+      result.push(rawLine); // preserve
+      continue;
+    }
+
+    // After leaving leading zone — always preserve
+    result.push(rawLine);
+  }
+
+  let cleaned = result.join("\n");
 
   // 1. Strip "System: [timestamp] Channel..." lines
   cleaned = cleaned.replace(
