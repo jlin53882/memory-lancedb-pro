@@ -1,0 +1,23 @@
+## ✅ Done — Conflict resolved + default updated
+
+### What was fixed
+
+1. **Rebased onto latest master** (adb621e), resolved `openclaw.plugin.json` conflict
+2. **`parsePluginConfig` now includes `autoRecallTimeoutMs`** (defaults to 5000ms)
+3. **Schema `default: 5000`** (matches discussion outcome)
+4. **UI schema synced**
+
+### Final PR status
+
+- `mergeStateStatus: CLEAN` ✅
+- `mergeable: MERGEABLE` ✅
+- AliceLJY ✅ APPROVED
+
+### Changes
+
+| File | Change |
+|------|--------|
+| `index.ts` | `parsePluginConfig` adds `autoRecallTimeoutMs`, default 5000ms |
+| `openclaw.plugin.json` | schema + uiSchema add the field, default 5000 |
+
+Ready to merge.

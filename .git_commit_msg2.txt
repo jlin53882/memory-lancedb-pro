@@ -1,0 +1,6 @@
+compress: update active_state after PR #482 review session
+
+- PR #482: Fix 3/4/5/6 pushed, awaiting author Fix 5 confirmation
+- PR #466: APPROVED, awaiting merge
+- New LanceDB memory: import-markdown Fix 5 scope direction (global not shared)
+- New learnings: GH CLI encoding, Codex prompt escaping, PR branch naming rule

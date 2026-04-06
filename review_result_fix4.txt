@@ -1,0 +1,3 @@
+LGTM
+
+`\b` word boundary 可確保只匹配完整的 "subagent" 單字，避免匹配到 "subagent's" 或 "subagentXXX" 等變體。對於去除 envelope metadata 的字串處理場景，這是正確的防護。

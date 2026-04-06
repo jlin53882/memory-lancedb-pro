@@ -1,0 +1,7 @@
+feat: add import-markdown CLI command
+
+Add `memory-pro import-markdown` command to migrate existing Markdown memories
+(MEMORY.md, memory/YYYY-MM-DD.md) into the plugin LanceDB store for semantic recall.
+
+This addresses Issue #344 by providing a migration path from the Markdown layer
+to the plugin memory layer.

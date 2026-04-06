@@ -1,0 +1,9 @@
+fix: address review feedback - schema completeness + timeout cleanup in finally
+
+Reviewer: rwmjhb (CortexReach)
+
+1. Schema completeness: add rerankTimeoutMs to openclaw.plugin.json retrieval schema and index.ts PluginConfig.retrieval
+2. Timeout cleanup: move clearTimeout into finally block so timer is always cleared even on fast failure paths
+3. Also update warning message to show actual configured timeout value
+
+Closes #346

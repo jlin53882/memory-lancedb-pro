@@ -1,0 +1,9 @@
+請用繁體中文 review 這個 commit，重點確認：1) 邏輯是否正確 2) 是否有副作用 3) 程式碼風格是否一致
+
+commit hash: 484845d
+
+這個 fix 的目的是：當 reranking 被停用（rerank === "none"）時，若 rerankApiKey 等欄位包含未解析的 ${...} placeholder，resolveEnvVars 會失敗。Fix 在每個 resolveEnvVars 呼叫前加上 .includes("${") 檢查，只在確定有 placeholder 時才解析。
+
+改動摘要（index.ts parsePluginConfig 函式）：
+- 新增註解說明此為 Bug 6 fix
+- 每個 rerankApiKey/rerankEndpoint/rerankModel/rerankProvider 的 typeof string 檢查都加上 && .includes("${") 條件

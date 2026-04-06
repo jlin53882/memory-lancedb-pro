@@ -1,0 +1,6 @@
+2026-04-03 learnings + PR number confirmation rule
+
+- LEARNINGS.md: PR number confusion, GH CLI encoding, Proposal A/B split pattern
+- ERRORS.md: GH CLI encoding error, PR number repeated confusion
+- dev_process_flow.md: PR workflow rule 7 (branch name with number + confirm before push)
+  + PR self-checklist updated

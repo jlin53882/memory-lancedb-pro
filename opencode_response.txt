@@ -1,0 +1,55 @@
+{
+  "info": {
+    "parentID": "msg_d56b5746a001rKHKiV0eOguAvV",
+    "role": "assistant",
+    "mode": "build",
+    "agent": "build",
+    "path": {
+      "cwd": "C:\\Users\\admin",
+      "root": "/"
+    },
+    "cost": 0,
+    "tokens": {
+      "input": 0,
+      "output": 0,
+      "reasoning": 0,
+      "cache": {
+        "read": 0,
+        "write": 0
+      }
+    },
+    "modelID": "openai/gpt-4o-mini",
+    "providerID": "openrouter",
+    "time": {
+      "created": 1775276225745,
+      "completed": 1775276226329
+    },
+    "error": {
+      "name": "APIError",
+      "data": {
+        "message": "This request requires more credits, or fewer max_tokens. You requested up to 16384 tokens, but can only afford 9729. To increase, visit https://openrouter.ai/settings/credits and upgrade to a paid account",
+        "statusCode": 402,
+        "isRetryable": false,
+        "responseHeaders": {
+          "access-control-allow-origin": "*",
+          "cf-ray": "9e6d800c290ba9cd-TPE",
+          "connection": "keep-alive",
+          "content-type": "application/json",
+          "date": "Sat, 04 Apr 2026 04:16:53 GMT",
+          "permissions-policy": "payment=(self \"https://checkout.stripe.com\" \"https://connect-js.stripe.com\" \"https://js.stripe.com\" \"https://*.js.stripe.com\" \"https://hooks.stripe.com\")",
+          "referrer-policy": "no-referrer, strict-origin-when-cross-origin",
+          "server": "cloudflare",
+          "transfer-encoding": "chunked",
+          "x-content-type-options": "nosniff"
+        },
+        "responseBody": "{\"error\":{\"message\":\"This request requires more credits, or fewer max_tokens. You requested up to 16384 tokens, but can only afford 9729. To increase, visit https://openrouter.ai/settings/credits and upgrade to a paid account\",\"code\":402,\"metadata\":{\"provider_name\":null}},\"user_id\":\"user_39YXvBc5aXcdjdDIXXHjqFrjn3m\"}",
+        "metadata": {
+          "url": "https://openrouter.ai/api/v1/chat/completions"
+        }
+      }
+    },
+    "id": "msg_d56b574d1001lGTAUQLt3mLdmf",
+    "sessionID": "ses_2a94a8bd5ffeE77TxcLh4EnVhU"
+  },
+  "parts": []
+}

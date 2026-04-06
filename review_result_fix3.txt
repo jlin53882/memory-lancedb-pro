@@ -1,0 +1,6 @@
+LGTM
+
+邏輯正確：
+1. `lastIndex = 0` — 避免 global regex 在 loop 中殘留狀態，確保每次 `.test()` 從頭匹配
+2. `continue` — 符合目的：skip boilerplate continuation lines，不當成 content 處理
+3. 條件只在 `strippingLeadIn` 為 true 時執行 — 範圍正確

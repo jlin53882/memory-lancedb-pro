@@ -1,0 +1,7 @@
+LGTM
+
+OpenCode Review 結果（commit 736eae1）：
+- 邏輯正確：this.decayEngine 存在時直接回傳 mapped（跳過 applyRecencyBoost），避免重複加成；不存在時才套用 recency boost
+- 副作用：無外部狀態修改，僅變更本地的 recencyBoosted 變數賦值流程
+- 風格一致：三元運算子用法與多數 JS codebase 慣例相符
+- 0 issues

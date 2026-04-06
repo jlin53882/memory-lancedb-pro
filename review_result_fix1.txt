@@ -1,0 +1,7 @@
+
+**LGTM**
+
+邏輯正確：
+- `rerank !== "none"` → 明確的啟用判斷
+- Guard 確保只在 rerank 啟用時才呼叫 `resolveEnvVars`
+- `typeof` + `includes` 雙重保護避免非字串或無需解析的情況

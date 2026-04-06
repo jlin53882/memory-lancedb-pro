@@ -1,0 +1,14 @@
+restore: restore accidentally deleted files from upstream/master
+
+Files were deleted from origin/master during earlier rebase/cherry-pick operations.
+These deletions were unintentional — the PRs were meant to add features, not delete
+existing functionality.
+
+Restored from upstream/master:
+- src/: admission-control, admission-stats, auto-capture-cleanup, batch-dedup,
+  clawteam-scope, identity-addressing, intent-analyzer, llm-oauth,
+  memory-compactor, preference-slots, retrieval-stats, retrieval-trace,
+  session-compressor, workspace-boundary
+- scripts/: governance-maintenance.mjs, migrate-governance-metadata.mjs
+- test/: 25 test files restored
+- README translations: DE, ES, FR, IT, JA, KO, PT-BR, RU, TW

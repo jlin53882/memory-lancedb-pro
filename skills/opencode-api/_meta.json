@@ -1,0 +1,8 @@
+{
+  "ownerId": "james53882",
+  "slug": "opencode-api",
+  "version": "1.0.0",
+  "publishedAt": 1743713400000,
+  "description": "透過 HTTP API 呼叫 OpenCode Server，支援 code review、檔案分析、批次任務",
+  "clawhubUrl": "https://clawhub.com/opencode-api"
+}
