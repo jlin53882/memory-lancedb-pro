@@ -56,61 +56,6 @@ import { batchDedup } from "./batch-dedup.js";
 // Envelope Metadata Stripping
 // ============================================================================
 
-const RUNTIME_WRAPPER_LINE_RE = /^\[(?:Subagent Context|Subagent Task)\]\s*/i;
-const RUNTIME_WRAPPER_PREFIX_RE = /^\[(?:Subagent Context|Subagent Task)\]/i;
-const RUNTIME_WRAPPER_BOILERPLATE_RE =
-  /(?:You are running as a subagent\b.*?(?:$|(?<=\.)\s+)|Results auto-announce to your requester\.?\s*|do not busy-poll for status\.?\s*|Reply with a brief acknowledgment only\.?\s*|Do not use any memory tools\.?\s*)/gi;
-
-function stripRuntimeWrapperBoilerplate(text: string): string {
-  return text
-    .replace(RUNTIME_WRAPPER_BOILERPLATE_RE, "")
-    .replace(/\s{2,}/g, " ")
-    .trim();
-}
-
-function stripLeadingRuntimeWrappers(text: string): string {
-  const trimmed = text.trim();
-  if (!trimmed) {
-    return trimmed;
-  }
-
-  const lines = trimmed.split("\n");
-  const cleanedLines: string[] = [];
-  let strippingLeadIn = true;
-
-  for (const line of lines) {
-    const current = line.trim();
-
-    if (strippingLeadIn && current === "") {
-      continue;
-    }
-
-    if (strippingLeadIn && RUNTIME_WRAPPER_PREFIX_RE.test(current)) {
-      const remainder = current.replace(RUNTIME_WRAPPER_LINE_RE, "").trim();
-      const cleaned = remainder ? stripRuntimeWrapperBoilerplate(remainder) : "";
-      if (cleaned) {
-        cleanedLines.push(cleaned);
-        strippingLeadIn = false;
-      }
-      continue;
-    }
-
-    if (
-      strippingLeadIn &&
-      /^(?:Results auto-announce to your requester\.?|do not busy-poll for status\.?|Reply with a brief acknowledgment only\.?|Do not use any memory tools\.?)$/i.test(
-        current,
-      )
-    ) {
-      continue;
-    }
-
-    strippingLeadIn = false;
-    cleanedLines.push(line);
-  }
-
-  return cleanedLines.join("\n").trim();
-}
-
 /**
  * Strip platform envelope metadata injected by OpenClaw channels before
  * the conversation text reaches the extraction LLM. These envelopes contain
@@ -124,6 +69,10 @@ function stripLeadingRuntimeWrappers(text: string): string {
  * - "Sender (untrusted metadata):" + JSON code blocks
  * - "Replied message (untrusted, for context):" + JSON code blocks
  * - Standalone JSON blocks containing message_id/sender_id fields
+ *
+ * Note: stripLeadingRuntimeWrappers and stripRuntimeWrapperBoilerplate from
+ * the old implementation are dead code after this refactor — they are not
+ * called anywhere in the pipeline. They have been removed.
  */
 export function stripEnvelopeMetadata(text: string): string {
   // Matches wrapper lines: [Subagent Context] or [Subagent Task], possibly with
