@@ -79,7 +79,30 @@
 - 指令：`git show upstream/master:{path} | grep {keyword}`
 - 如果 upstream 已有 → 視情況 skip 或 rebase，否則可能白做工
 
-### R12｜複雜 JSON 衝突處理
+### R12｜模糊指令先問清楚
+- 收到的指令有兩種以上可能的解讀時，先停在原地問清楚
+- 不要自己假設意圖然後蠻幹
+
+### R13｜含中文 UTF-8 強制用 Python
+- 含中文的文字檔操作（讀寫 .md/.json/.txt 等），一律用 Python subprocess
+- PowerShell `>` 重新導向會搞砸 UTF-8 和 CRLF，禁止用於文字檔操作
+- PowerShell 只做：git checkout, git status, mkdir, 簡單系統指令
+
+### R14｜Push 完成後驗證 remote 內容
+- Push 完成後必須確認 remote branch 包含正確內容
+- 驗證方式：`gh api repos/{owner}/{repo}/pulls/{N} --jq '.head.ref'` 確認 head branch
+- Push 失敗時立即告知 James，不要假設 remote 已經更新
+
+### R15｜Sub-agent 監督檢查清單
+Sub-agent 完成後，main session 必須依序執行：
+1. `git show HEAD --stat`（看變更範圍）
+2. 抽查關鍵檔案的實際內容（不能只看 git log）
+3. 確認變更範圍符合預期
+4. 才能送 review 或 push
+
+---
+
+### R16｜複雜 JSON 衝突處理
 - 複雜 JSON 衝突 → 用 Python script 處理（`json.load()` 驗證 + 字串替換）
 - 每次編輯後立即驗證：`python -c "import json; json.load(open('file.json'))"`
 - 不要用 PowerShell `Select-String` 對大 JSON 做關鍵字比對（會誤報）

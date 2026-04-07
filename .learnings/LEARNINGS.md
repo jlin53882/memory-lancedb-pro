@@ -284,6 +284,29 @@ LEARNED: Sub-agent 完成後，main session 必須驗證 commit 正確性（git 
 | R6 | 被糾正時不回嘴 → 認錯 → 記錄 → 確認不再犯 | 任何被 James 糾正 |
 | R7 | 編輯任何檔案前先讀取；寫入後確認 | 所有檔案操作 |
 | R8 | GitHub 中文 comment 用 `--body-file` 而非 `--body` | gh cli 送中文內容 |
+| R9 | 禁止自行重啟 OpenClaw Gateway，需 James 同意 | gateway restart 需求 |
+| R10 | SOUL.md 與 AGENTS.md 是綁定準則，修改任一請同步檢視另一檔案 | 任何準則修改場景 |
+
+---
+
+### 嚴禁自行重啟 OpenClaw（2026-04-07 新增）
+
+**鐵則**：嚴禁 agent 未經 James 同意自行執行 `openclaw gateway restart` 或任何系統層級重啟。
+
+**原因**：重啟後 agent 會短暫離線，可能造成中斷。
+
+**正確流程**：通知 James → 說明影響 → 等 James 親自執行。
+
+---
+
+### SOUL.md + AGENTS.md 綁定規則（2026-04-07 新增）
+
+**背景**：James 要求 SOUL.md 和 AGENTS.md 是成對的行為準則，修改任一都必須同步檢視另一個。
+
+**具體規則**：
+1. 讀取 SOUL.md 前先看 AGENTS.md
+2. 修改 SOUL.md 前先對照 AGENTS.md 有無需要同步調整的規則
+3. 修改 AGENTS.md 前先對照 SOUL.md 的核心價值是否受影響
 
 ---
 
