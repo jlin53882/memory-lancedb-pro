@@ -80,13 +80,16 @@ export function stripEnvelopeMetadata(text: string): string {
   // Also matches when the wrapper prefix is on its own line ("]\n" = no content after ]).
   const WRAPPER_LINE_RE = /^\[(?:Subagent Context|Subagent Task)\](?:\s|$|\n)?/i;
   const BOILERPLATE_RE = /^(?:Results auto-announce to your requester\.?|do not busy-poll for status\.?|Reply with a brief acknowledgment only\.?|Do not use any memory tools\.?)$/im;
-  const SUBAGENT_RUNNING_RE = /You are running as a subagent\b/i;
+  // Anchor to start of line — prevents quoted/cited false-positives
+  const SUBAGENT_RUNNING_RE = /^You are running as a subagent\b/i;
 
   const originalLines = text.split("\n");
 
   // Pre-scan: determine if there are leading wrappers.
   // Needed to decide whether boilerplate in the leading zone should be stripped
   // (boilerplate without a wrapper prefix is preserved — it may be legitimate user text).
+  // NOTE: also used as a safety guard for N2 — only strip wrapper lines
+  // when they appear inside the leading zone.
   const hasLeadingWrapper = originalLines.some((rawLine) =>
     WRAPPER_LINE_RE.test(rawLine.trim())
   );
@@ -105,13 +108,20 @@ export function stripEnvelopeMetadata(text: string): string {
     const isBoilerplate = BOILERPLATE_RE.test(trimmed);
     const isSubagentContent = prevWasWrapper && SUBAGENT_RUNNING_RE.test(trimmed);
 
-    if (isWrapper) {
+    // Strip wrapper lines only when inside the leading zone (N2 fix)
+    if (stillInLeadingZone && isWrapper) {
       prevWasWrapper = true;
       result.push(""); // strip wrapper
       continue;
     }
 
     if (stillInLeadingZone) {
+      // Blank line — strip but do NOT exit the leading zone (Must Fix 1 fix)
+      if (trimmed === "") {
+        result.push("");
+        continue;
+      }
+
       if (isBoilerplate) {
         // Boilerplate in leading zone — strip only when there was a wrapper prefix.
         // This preserves standalone boilerplate text that happens to match the
