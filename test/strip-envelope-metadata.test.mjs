@@ -181,6 +181,48 @@ describe("stripEnvelopeMetadata", () => {
     assert.match(result, /I need you to remember my preferences/);
   });
 
+  // FIX 1 (MAJOR): boilerplate BEFORE wrapper in leading zone — must be PRESERVED
+  // Root cause: encounteredWrapperYet flag ensures boilerplate is only stripped
+  // when a wrapper has ALREADY appeared on a previous line, not just because
+  // a wrapper exists somewhere in the leading zone.
+  it("preserves boilerplate that appears BEFORE wrapper in leading zone", () => {
+    const input = [
+      "Do not use any memory tools.",
+      "[Subagent Context]",
+      "Actual user content starts here.",
+    ].join("\n");
+
+    const result = stripEnvelopeMetadata(input);
+    // Boilerplate BEFORE wrapper must be preserved (not a false positive)
+    assert.match(result, /Do not use any memory tools/);
+    assert.match(result, /Actual user content starts here/);
+    assert.doesNotMatch(result, /Subagent Context/);
+  });
+
+  // FIX 2 (MINOR): wrapper with inline content — preserve non-boilerplate remainder
+  // Old implementation stripped only the wrapper prefix, preserving inline payload.
+  // New implementation initially dropped the entire line (regression).
+  // This fix restores inline content preservation.
+  it("preserves non-boilerplate inline content after wrapper prefix", () => {
+    const input = [
+      "[Subagent Context] Actual user content starts here.",
+    ].join("\n");
+
+    const result = stripEnvelopeMetadata(input);
+    assert.match(result, /Actual user content starts here/);
+    assert.doesNotMatch(result, /Subagent Context/);
+  });
+
+  // FIX 2 regression: wrapper inline boilerplate should still be stripped
+  it("strips boilerplate-only inline content after wrapper prefix", () => {
+    const input = [
+      "[Subagent Task] Reply with a brief acknowledgment only.",
+    ].join("\n");
+
+    const result = stripEnvelopeMetadata(input);
+    assert.equal(result, "");
+  });
+
   it("handles Telegram-style envelope headers", () => {
     const input = [
       "System: [2026-03-18 14:21:36 GMT+8] Telegram[bot123] DM | user_456 [msg:12345]",
