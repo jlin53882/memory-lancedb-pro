@@ -1615,10 +1615,11 @@ const pluginVersion = getPluginVersion();
 // Plugin Definition
 // ============================================================================
 
-// WeakSet keyed by API instance — each distinct API object tracks its own initialized state.
-// Using WeakSet instead of a module-level boolean avoids the "second register() call skips
-// hook/tool registration for the new API instance" regression that rwmjhb identified.
-const _registeredApis = new WeakSet<OpenClawPluginApi>();
+// _registeredApis Map keyed by API instance.
+// Uses Map (not WeakSet) so that:
+//  1. Only successfully-initialized instances are marked (set after try block succeeds)
+//  2. resetRegistration() can clear the map for test/hot-reload scenarios
+const _registeredApis = new Map<OpenClawPluginApi, boolean>();
 
 const memoryLanceDBProPlugin = {
   id: "memory-lancedb-pro",
@@ -1628,12 +1629,18 @@ const memoryLanceDBProPlugin = {
   kind: "memory" as const,
 
   register(api: OpenClawPluginApi) {
-    // Idempotent guard: skip re-init if this exact API instance has already registered.
-    if (_registeredApis.has(api)) {
+    // Idempotent guard: skip re-init if this exact API instance has already successfully initialized.
+    if (_registeredApis.get(api) === true) {
       api.logger.debug?.("memory-lancedb-pro: register() called again — skipping re-init (idempotent)");
       return;
     }
-    _registeredApis.add(api);
+
+    try {
+      // ---- Initialization ----
+      // NOTE: _registeredApis.set(api, true) is called at the end of this try block,
+      // ONLY if all initialization succeeds. This ensures that a failed init
+      // (e.g. parsePluginConfig throw) does NOT mark the api as registered,
+      // so a subsequent register(api) retry can re-attempt initialization.
 
     // Parse and validate configuration
     const config = parsePluginConfig(api.pluginConfig);
@@ -4040,6 +4047,11 @@ export function parsePluginConfig(value: unknown): PluginConfig {
                 : 30,
           }
         : { skipLowValue: false, maxExtractionsPerHour: 30 },
+      _registeredApis.set(api, true);
+    } catch (err) {
+      api.logger.warn("memory-lancedb-pro: register() init failed — instance NOT marked as registered: " + String(err));
+      // Do NOT call _registeredApis.set() here — allows retry on next register(api)
+    }
   };
 }
 
@@ -4048,11 +4060,18 @@ export function parsePluginConfig(value: unknown): PluginConfig {
  * to unload/reload the plugin without restarting the process.
  * @public
  */
+// _registeredApis 內部 Map，測試時可透過 _getRegisteredApisForTest() 存取（僅供測試用）。
+function _getRegisteredApisForTest() {
+  return _registeredApis;
+}
+
+export { _getRegisteredApisForTest };
+
 export function resetRegistration() {
-  // Note: WeakSets cannot be cleared by design. In test scenarios where the
-  // same process reloads the module, a fresh module state means a new WeakSet.
-  // For hot-reload scenarios, the module is re-imported fresh.
-  // (WeakSet.clear() does not exist, so we do nothing here.)
+  // Clear the _registeredApis Map so that register(api) can succeed again.
+  // This enables test scenarios and hot-reload to re-initialize the plugin
+  // without restarting the process.
+  _registeredApis.clear();
 }
 
 export default memoryLanceDBProPlugin;

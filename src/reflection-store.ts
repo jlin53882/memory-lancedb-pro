@@ -428,6 +428,27 @@ function isReflectionMetadataType(type: unknown): boolean {
 
 function isOwnedByAgent(metadata: Record<string, unknown>, agentId: string): boolean {
   const owner = typeof metadata.agentId === "string" ? metadata.agentId.trim() : "";
+  const itemKind = metadata.itemKind;
+  const type = metadata.type;
+
+  // memory-reflection-item：必須是 invariant 或 derived 才能走正常邏輯
+  // 未知 / 錯誤的 itemKind → fail-closed（完全不可見）
+  if (type === "memory-reflection-item") {
+    if (itemKind === "derived") {
+      // derived：不走 main fallback，空白 owner → 完全不可見
+      if (!owner) return false;
+      return owner === agentId;
+    }
+    if (itemKind === "invariant") {
+      // invariant：空白 owner 可見（main fallback），有 owner 時限本人或 main
+      if (!owner) return true;
+      return owner === agentId || owner === "main";
+    }
+    // 非法的 itemKind（如 "weird-kind"、空字串、數字等）→ fail-closed
+    return false;
+  }
+
+  // legacy / mapped（無 itemKind）：維持原本的 main fallback
   if (!owner) return true;
   return owner === agentId || owner === "main";
 }
