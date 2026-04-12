@@ -2117,6 +2117,9 @@ const memoryLanceDBProPlugin = {
       }
     );
 
+    // Mark as successfully initialized - only called after all init completes
+    _registeredApis.set(api, true);
+
     // Auto-compaction at gateway_start (if enabled, respects cooldown)
     if (config.memoryCompaction?.enabled) {
       api.on("gateway_start", () => {
