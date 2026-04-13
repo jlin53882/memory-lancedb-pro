@@ -298,28 +298,24 @@ function resolveLlmTimeoutMs(config: PluginConfig): number {
   return parsePositiveInt(config.llm?.timeoutMs) ?? 30000;
 }
 
-// Valid agent IDs must start with an ASCII letter (a-zA-Z).
-// Pure numeric IDs (e.g. "657229412030480397") are invalid — they come from
-// chat_id being misinterpreted as agentId and cause auto-recall to timeout.
-const VALID_AGENT_ID_RE = /^[a-zA-Z][a-zA-Z0-9_-]*$/;
-
-function resolveHookAgentId(
-  explicitAgentId: string | undefined,
-  sessionKey: string | undefined,
-): string {
-  const trimmedExplicit = explicitAgentId?.trim();
-  const resolved = (trimmedExplicit && trimmedExplicit.length > 0
-    ? trimmedExplicit
-    : parseAgentIdFromSessionKey(sessionKey)) || "main";
-  return resolved;
+// Detect when agentId came from a chat_id / user: source (e.g. "657229412030480397").
+// These are numeric Discord/Telegram IDs mistakenly used as agent IDs and cause
+// auto-recall to timeout. We skip them rather than block all pure-numeric IDs
+// to avoid false positives for intentionally numeric agent names.
+function isChatIdBasedAgentId(agentId: string): boolean {
+  return /^\d+$/.test(agentId); // pure digits = almost certainly a chat_id, not a real agent
 }
 
 /**
- * Returns true when agentId fails the VALID_AGENT_ID_RE pattern.
- * Used as an early-exit guard before expensive hook operations.
+ * Returns true when agentId is invalid — either empty/undefined, or detected as
+ * a chat_id numeric ID (Discord/Telegram user IDs mistakenly used as agentId).
  */
 function isInvalidAgentIdFormat(agentId: string | undefined): boolean {
-  return !agentId || !VALID_AGENT_ID_RE.test(agentId);
+  if (!agentId) return true;
+  // Pure numeric IDs are almost always chat_id extractions, not real agent IDs.
+  // This avoids false-positives from intentionally numeric agent names (which are
+  // vanishingly rare in practice and would still be caught by the empty-string guard).
+  return isChatIdBasedAgentId(agentId);
 }
 
 function resolveSourceFromSessionKey(sessionKey: string | undefined): string {
