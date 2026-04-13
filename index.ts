@@ -298,14 +298,28 @@ function resolveLlmTimeoutMs(config: PluginConfig): number {
   return parsePositiveInt(config.llm?.timeoutMs) ?? 30000;
 }
 
+// Valid agent IDs must start with an ASCII letter (a-zA-Z).
+// Pure numeric IDs (e.g. "657229412030480397") are invalid — they come from
+// chat_id being misinterpreted as agentId and cause auto-recall to timeout.
+const VALID_AGENT_ID_RE = /^[a-zA-Z][a-zA-Z0-9_-]*$/;
+
 function resolveHookAgentId(
   explicitAgentId: string | undefined,
   sessionKey: string | undefined,
 ): string {
   const trimmedExplicit = explicitAgentId?.trim();
-  return (trimmedExplicit && trimmedExplicit.length > 0
+  const resolved = (trimmedExplicit && trimmedExplicit.length > 0
     ? trimmedExplicit
     : parseAgentIdFromSessionKey(sessionKey)) || "main";
+  return resolved;
+}
+
+/**
+ * Returns true when agentId fails the VALID_AGENT_ID_RE pattern.
+ * Used as an early-exit guard before expensive hook operations.
+ */
+function isInvalidAgentIdFormat(agentId: string | undefined): boolean {
+  return !agentId || !VALID_AGENT_ID_RE.test(agentId);
 }
 
 function resolveSourceFromSessionKey(sessionKey: string | undefined): string {
@@ -2304,6 +2318,12 @@ const memoryLanceDBProPlugin = {
         // Per-agent exclusion: skip auto-recall for agents in the exclusion list.
         const sessionKey = (event as any).sessionKey as string | undefined;
         const agentId = resolveHookAgentId(ctx?.agentId, sessionKey);
+        if (isInvalidAgentIdFormat(agentId)) {
+          api.logger.debug?.(
+            `memory-lancedb-pro: auto-recall skipped — invalid agentId format '${agentId}'`,
+          );
+          return;
+        }
         if (
           Array.isArray(config.autoRecallExcludeAgents) &&
           config.autoRecallExcludeAgents.length > 0 &&
@@ -2341,6 +2361,10 @@ const memoryLanceDBProPlugin = {
         const recallWork = async (): Promise<{ prependContext: string } | undefined> => {
           // Determine agent ID and accessible scopes
           const agentId = resolveHookAgentId(ctx?.agentId, (event as any).sessionKey);
+          if (isInvalidAgentIdFormat(agentId)) {
+            api.logger.debug?.(`memory-lancedb-pro: auto-recall skip — invalid agentId '${agentId}'`);
+            return undefined;
+          }
           const accessibleScopes = resolveScopeFilter(scopeManager, agentId);
 
           // FR-04: Truncate long prompts (e.g. file attachments) before embedding.
@@ -2649,6 +2673,10 @@ const memoryLanceDBProPlugin = {
 
           // Determine agent ID and default scope
           const agentId = resolveHookAgentId(ctx?.agentId, (event as any).sessionKey);
+          if (isInvalidAgentIdFormat(agentId)) {
+            api.logger.debug(`memory-lancedb-pro: auto-capture skip — invalid agentId '${agentId}'`);
+            return;
+          }
           const accessibleScopes = resolveScopeFilter(scopeManager, agentId);
           const defaultScope = isSystemBypassId(agentId)
             ? config.scopes?.default ?? "global"
@@ -3172,6 +3200,10 @@ const memoryLanceDBProPlugin = {
             typeof ctx.agentId === "string" ? ctx.agentId : undefined,
             sessionKey,
           );
+          if (isInvalidAgentIdFormat(agentIdForExclude)) {
+            api.logger.debug?.(`memory-lancedb-pro: reflection inheritance skip — invalid agentId '${agentIdForExclude}'`);
+            return;
+          }
           if (isAgentOrSessionExcluded(agentIdForExclude, sessionKey, config.autoRecallExcludeAgents)) {
             api.logger.debug?.(
               `memory-lancedb-pro: reflection inheritance skipped for excluded agent '${agentIdForExclude}'`,
@@ -3214,6 +3246,10 @@ const memoryLanceDBProPlugin = {
             typeof ctx.agentId === "string" ? ctx.agentId : undefined,
             sessionKey,
           );
+          if (isInvalidAgentIdFormat(agentIdForExclude)) {
+            api.logger.debug?.(`memory-lancedb-pro: reflection derived+error skip — invalid agentId '${agentIdForExclude}'`);
+            return;
+          }
           if (isAgentOrSessionExcluded(agentIdForExclude, sessionKey, config.autoRecallExcludeAgents)) {
             api.logger.debug?.(
               `memory-lancedb-pro: reflection derived+error injection skipped for excluded agent '${agentIdForExclude}'`,
@@ -3665,6 +3701,10 @@ const memoryLanceDBProPlugin = {
             typeof ctx.agentId === "string" ? ctx.agentId : undefined,
             sessionKey,
           );
+          if (isInvalidAgentIdFormat(agentId)) {
+            api.logger.debug?.(`session-memory [before_reset]: skip — invalid agentId '${agentId}'`);
+            return;
+          }
           const defaultScope = isSystemBypassId(agentId)
             ? config.scopes?.default ?? "global"
             : scopeManager.getDefaultScope(agentId);
