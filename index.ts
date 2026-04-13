@@ -110,6 +110,9 @@ interface PluginConfig {
   maxRecallPerTurn?: number;
   /** Agent/session exclusion list for auto-recall. Supports exact match, wildcard prefix (e.g. "pi-"), and "temp:*" for internal reflection sessions. */
   autoRecallExcludeAgents?: string[];
+  /** Cached set of agent IDs declared in openclaw.json agents.list. Used to validate agentId
+   *  and skip hooks for unknown IDs (e.g. numeric chat_ids mistakenly used as agentId). */
+  declaredAgents?: Set<string>;
   recallMode?: "full" | "summary" | "adaptive" | "off";
   captureAssistant?: boolean;
   retrieval?: {
@@ -307,15 +310,22 @@ function isChatIdBasedAgentId(agentId: string): boolean {
 }
 
 /**
- * Returns true when agentId is invalid — either empty/undefined, or detected as
- * a chat_id numeric ID (Discord/Telegram user IDs mistakenly used as agentId).
+ * Returns true when agentId is invalid — either empty/undefined, detected as a
+ * numeric chat_id, or not present in the openclaw.json declared agents list.
+ * Pass `declaredAgents` (from config.declaredAgents) for authoritative validation.
  */
-function isInvalidAgentIdFormat(agentId: string | undefined): boolean {
+function isInvalidAgentIdFormat(
+  agentId: string | undefined,
+  declaredAgents?: Set<string>,
+): boolean {
   if (!agentId) return true;
   // Pure numeric IDs are almost always chat_id extractions, not real agent IDs.
-  // This avoids false-positives from intentionally numeric agent names (which are
-  // vanishingly rare in practice and would still be caught by the empty-string guard).
-  return isChatIdBasedAgentId(agentId);
+  if (isChatIdBasedAgentId(agentId)) return true;
+  // If we have a declared agents list, treat unknown IDs as invalid.
+  if (declaredAgents && declaredAgents.size > 0 && !declaredAgents.has(agentId)) {
+    return true;
+  }
+  return false;
 }
 
 function resolveSourceFromSessionKey(sessionKey: string | undefined): string {
@@ -2314,7 +2324,7 @@ const memoryLanceDBProPlugin = {
         // Per-agent exclusion: skip auto-recall for agents in the exclusion list.
         const sessionKey = (event as any).sessionKey as string | undefined;
         const agentId = resolveHookAgentId(ctx?.agentId, sessionKey);
-        if (isInvalidAgentIdFormat(agentId)) {
+        if (isInvalidAgentIdFormat(agentId, config.declaredAgents)) {
           api.logger.debug?.(
             `memory-lancedb-pro: auto-recall skipped — invalid agentId format '${agentId}'`,
           );
@@ -2357,7 +2367,7 @@ const memoryLanceDBProPlugin = {
         const recallWork = async (): Promise<{ prependContext: string } | undefined> => {
           // Determine agent ID and accessible scopes
           const agentId = resolveHookAgentId(ctx?.agentId, (event as any).sessionKey);
-          if (isInvalidAgentIdFormat(agentId)) {
+          if (isInvalidAgentIdFormat(agentId, config.declaredAgents)) {
             api.logger.debug?.(`memory-lancedb-pro: auto-recall skip — invalid agentId '${agentId}'`);
             return undefined;
           }
@@ -2669,7 +2679,7 @@ const memoryLanceDBProPlugin = {
 
           // Determine agent ID and default scope
           const agentId = resolveHookAgentId(ctx?.agentId, (event as any).sessionKey);
-          if (isInvalidAgentIdFormat(agentId)) {
+          if (isInvalidAgentIdFormat(agentId, config.declaredAgents)) {
             api.logger.debug(`memory-lancedb-pro: auto-capture skip — invalid agentId '${agentId}'`);
             return;
           }
@@ -3196,7 +3206,7 @@ const memoryLanceDBProPlugin = {
             typeof ctx.agentId === "string" ? ctx.agentId : undefined,
             sessionKey,
           );
-          if (isInvalidAgentIdFormat(agentIdForExclude)) {
+          if (isInvalidAgentIdFormat(agentIdForExclude, config.declaredAgents)) {
             api.logger.debug?.(`memory-lancedb-pro: reflection inheritance skip — invalid agentId '${agentIdForExclude}'`);
             return;
           }
@@ -3242,7 +3252,7 @@ const memoryLanceDBProPlugin = {
             typeof ctx.agentId === "string" ? ctx.agentId : undefined,
             sessionKey,
           );
-          if (isInvalidAgentIdFormat(agentIdForExclude)) {
+          if (isInvalidAgentIdFormat(agentIdForExclude, config.declaredAgents)) {
             api.logger.debug?.(`memory-lancedb-pro: reflection derived+error skip — invalid agentId '${agentIdForExclude}'`);
             return;
           }
@@ -3697,7 +3707,7 @@ const memoryLanceDBProPlugin = {
             typeof ctx.agentId === "string" ? ctx.agentId : undefined,
             sessionKey,
           );
-          if (isInvalidAgentIdFormat(agentId)) {
+          if (isInvalidAgentIdFormat(agentId, config.declaredAgents)) {
             api.logger.debug?.(`session-memory [before_reset]: skip — invalid agentId '${agentId}'`);
             return;
           }
@@ -3964,6 +3974,21 @@ export function parsePluginConfig(value: unknown): PluginConfig {
     sessionStrategy === "memoryReflection" &&
     (memoryReflectionRaw?.storeToLanceDB !== false);
 
+  // Build declaredAgents Set from openclaw.json agents.list for fast lookups.
+  const declaredAgents = new Set<string>();
+  const agentsList = (cfg as Record<string, unknown>).agents as Record<string, unknown> | undefined;
+  if (agentsList) {
+    const list = agentsList.list as unknown;
+    if (Array.isArray(list)) {
+      for (const entry of list) {
+        if (entry && typeof entry === "object") {
+          const id = (entry as Record<string, unknown>).id;
+          if (typeof id === "string" && id.trim().length > 0) declaredAgents.add(id.trim());
+        }
+      }
+    }
+  }
+
   return {
     embedding: {
       provider: "openai-compatible",
@@ -4010,6 +4035,12 @@ export function parsePluginConfig(value: unknown): PluginConfig {
     autoRecallMaxChars: parsePositiveInt(cfg.autoRecallMaxChars) ?? 600,
     autoRecallPerItemMaxChars: parsePositiveInt(cfg.autoRecallPerItemMaxChars) ?? 180,
     maxRecallPerTurn: parsePositiveInt(cfg.maxRecallPerTurn) ?? 10,
+    autoRecallExcludeAgents: Array.isArray(cfg.autoRecallExcludeAgents)
+      ? (cfg.autoRecallExcludeAgents as unknown[]).filter(
+          (s: unknown) => typeof s === "string" && (s as string).trim().length > 0,
+        ) as string[]
+      : undefined,
+    declaredAgents,
     captureAssistant: cfg.captureAssistant === true,
     retrieval: typeof cfg.retrieval === "object" && cfg.retrieval !== null ? cfg.retrieval as any : undefined,
     decay: typeof cfg.decay === "object" && cfg.decay !== null ? cfg.decay as any : undefined,
