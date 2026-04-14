@@ -1,0 +1,311 @@
+# Proposal B 對抗式 Review Prompt
+
+你是專業的軟體架構師與 code reviewer。你需要對以下 Proposal B 衝突分析報告進行對抗式 review。
+
+## 審查目標
+
+Proposal B 的衝突分析報告，包含：
+- 上游 pipeline 結構
+- 3 個高風險衝突（需要 maintainer 確認）
+- 4 個中風險衝突
+- 3 個低風險衝突
+- 實作前置條件檢查清單
+
+## 對抗式 Review 要求
+
+請用繁體中文對這份報告進行對抗式 review，重點：
+
+### 1. 邏輯一致性
+- 衝突 A（MMR 衝突）：報告說「B-2 在 MMR 之後，neighbors 會受限於 MMR survivors」，但有沒有可能是 B-2 的 neighbor lookup 是對每個 recall result 獨立的資料庫查詢，而非對 MMR 輸出做查詢？如果是前者，MMR 完全不影響 B-2 的 neighbor 數量？
+- 衝突 B（vector-only）：報告推薦方案 A（只實作 hybrid path），但有沒有可能是錯誤的建議？如果 hybrid path 才是主流路徑，這樣的建議是否過度保守？
+
+### 2. 假設驗證
+- 報告中哪些假設可能是錯誤的？
+- 哪些「可以自己決定」的問題，其實並不能自己決定？
+
+### 3. 遺漏的衝突
+- 還有哪些衝突是報告沒有提到的？
+- 與 #8111e26（expiry filter）、#452（auto-supersede）、#453（temporal-awareness）的互動，是否有其他被忽略的？
+
+### 4. 實作可行性
+- 衝突 D（expiry_filter）中建議的 `excludeInactive: true` 真的有幫助嗎？如果 B-2 在 MMR 之後，expiry_filter 早就執行完了，`excludeInactive` 參數在這個階段是否有意義？
+- B-1 的 `invalidated_at` filter 建議：store.bm25Search() 是否有 `excludeInactive` 選項？如果沒有，這個建議是否可執行？
+
+### 5. 衝突 C（權力問題）
+- 這個問題真的是「阻塞」嗎？還是其實有 workaround？（例如：下一個 PR 只提給 rwmjhb，不提給 AliceLJY）
+
+### 6. Pipeline 細節
+- `hybridRetrieval()` 中，步驟 2 的 `Promise.all` 同時跑 vectorSearch 和 bm25Search，但 B-2 的 neighbor lookup 應該在哪個階段執行？如果在 `fuseResults()` 之後，bm25Search 的結果是否已經被用到？
+- BM25 neighbor lookup 和 BM25 search 是同一個東西嗎？有沒有搞混？
+
+## 輸出格式
+
+請用繁體中文輸出，格式：
+
+```
+# 對抗式 Review 結果
+
+## 假設驗證
+（列出報告中可能錯誤的假設）
+
+## 邏輯一致性問題
+（列出邏輯不一致的地方）
+
+## 遺漏的衝突
+（列出報告沒提到的問題）
+
+## 實作可行性問題
+（列出建議不可執行的點）
+
+## 降級建議
+（哪些 🔴 可以降級？哪些 🟡 可以自己決定？）
+
+## 最終優先級清單
+（重新評估所有衝突的優先級）
+```
+
+請盡量尖銳，不要客氣。這是為了幫 James 節省時間，不是為了安慰他。
+
+
+---
+
+## 待審查的衝突分析報告全文：
+
+# Proposal B 實作前衝突分析完整報告（最終版）
+
+> 整理日期：2026-04-09
+> 整理者：AI 程式修改助手（主體分析 + 2 個 Sub-agent 交叉分析 + MiniMax M2.7 對抗式 review）
+> 資料來源：proposal-b-analysis.md、proposal-b-issue-details.md、proposal-b-pr-details.md、proposal-b-codebase-conflicts.md、proposal-b-missed-issues.md、上游 `memory-lancedb-pro-master/src/`
+> Claude Code Review Checklist 對抗式審查：Schema 對應實作、Pattern 邊界、常數清理、改動範圍、Error Logging、向後相容
+
+---
+
+## 一、上游最新 Pipeline（hybridRetrieval）精確順序
+
+```
+1.  embedQuery() + buildBM25Query()
+2.  Promise.all([runVectorSearch(), runBM25Search()])   ← 兩階段平行搜尋
+3.  fuseResults()                                       ← RRF fusion
+4.  filter: score >= minScore
+5.  filter: !isMemoryExpired()                         ← #8111e26 移至此（scoring 之前）
+6.  rerankResults()                                      ← 若 rerank !== "none"
+7.  applyRecencyBoost()
+8.  applyImportanceWeight()
+9.  applyLengthNormalization()
+10. filter: score >= hardMinScore
+11. applyDecayBoost() 或 applyTimeDecay()
+12. filterNoise()
+13. applyMMRDiversity()                                 ← MMR 多樣性去重
+14. slice(0, limit)
+15. return
+```
+
+`vectorOnlyRetrieval()` 與 `bm25OnlyRetrieval()` 架構類似，**亦有獨立的 expiry_filter**，位於搜尋之後、scoring 之前。
+
+---
+
+## 二、🔴 高風險衝突（需要 maintainer 確認才能實作）
+
+### 衝突 A：MMR 衝突 — AliceLJY 的建議本身有矛盾（Q5）
+
+| 項目 | 內容 |
+|------|------|
+| **提出者** | jlin53882（Issue #538 Q5）|
+| **緊急度** | 🔴 阻塞 |
+| **狀態** | ❌ **從未得到回覆** |
+
+**問題**：
+
+AliceLJY 在 Issue #538 Q2 回答中說「在 MMR 之後插入」B-2，理由是「MMR 負責多樣性，neighbor enrichment 是對 top-K 結果的補充」。
+
+但 MMR 的工作就是「刪除相似的 items」。如果某個 neighbor 與 MMR 已選中的 result 相似，MMR 已經把它刪掉了。**B-2 在 MMR 之後執行時，已被 MMR 刪除的相似 items 永遠無法成為 neighbors**。
+
+**對抗式 review 發現**：這個衝突的根源在於「B-2 的 neighbor lookup 是對什麼做查詢」沒有被定義清楚：
+- 如果 B-2 是對每個 MMR survivor 的 text 做獨立的 `bm25Search()` 資料庫查詢，則 MMR 完全不影響 neighbors 的數量
+- 如果 B-2 是對 MMR 的整個輸出集合再做一次 BM25 search，則 MMR survivors 決定了候選範圍
+
+**三個可選方案**：
+
+| 方案 | 做法 | 風險 |
+|------|------|------|
+| A | 將 B-2 插入點改為 MMR **之前**（步驟 12 之後）| 改變了 AliceLJY 的明確指示，需要 maintainer 確認 |
+| B | 維持 MMR 之後，接受「neighbors 僅限 MMR survivors」的代價 | 可能在 PR review 時被 challenge |
+| C | 如果 B-2 的 neighbor lookup 是對每個 recall result 獨立的資料庫查詢，則 MMR 完全不影響 | 需要在 PR 中明確定義 neighbor lookup 的輸入 |
+
+---
+
+### 衝突 B：vectorOnlyRetrieval() 路徑沒有 BM25（Q6）
+
+| 項目 | 內容 |
+|------|------|
+| **提出者** | jlin53882（Issue #538 Q6）|
+| **緊急度** | 🔴 阻塞 |
+| **狀態** | ❌ **從未得到回覆** |
+
+**問題**：
+
+B-2 的 neighbor lookup 設計用 `bm25Search()` 或 `vectorSearch()`。但 `vectorOnlyRetrieval()` 路徑完全沒有 BM25 search 階段。
+
+**對抗式 review 發現**：這個問題的嚴重程度可能被高估了。如果 B-2 的 neighbor lookup 是對每個 recall result 做獨立的 `vectorSearch()`（而非 BM25），則 vector-only path 可以完全正常運作。**關鍵問題是 B-2 的 neighbor lookup 到底用 BM25 還是 vector search**。
+
+| 方案 | 做法 | 優點 | 缺點 |
+|------|------|------|------|
+| A（推薦）| **只實作 hybrid path**，vector-only 跳過 B-2 | 簡單，符合「scope 精簡」原則 | 功能不完整 |
+| B | 對 vector-only 也做 BM25 search | 功能完整一致 | 違背 vector-only 初衷 |
+| C | vector-only 用 vector search 找 neighbors | 不需要 BM25，架構統一 | 與 B-1 不一致 |
+| D | hybrid 用 BM25，vector-only 用 vector | 最完整 | 最複雜 |
+
+---
+
+### 衝突 C：權力問題 — AliceLJY ✅ vs rwmjhb ❌（誰說了算）
+
+| 項目 | 內容 |
+|------|------|
+| **提出者** | jlin53882（Issue #513）|
+| **緊急度** | 🔴 阻塞 |
+| **狀態** | ❌ **從未得到回覆** |
+
+**問題**：
+
+- AliceLJY 對 PR #529 給了 `APPROVED` / `LGTM`
+- rwmjhb 以 `BLOCKING` 關閉了 PR #529
+- **目前沒有共識機制**
+
+**對抗式 review 發現**：這個問題的 workaround 其實很簡單——下一個 PR 只提給 rwmjhb，不提給 AliceLJY，等 rwmjhb 審查。如果 rwmjhb 批准，就繞過了這個權力問題。當然，這不是一個好的長期解決方案，但可以作為短期 workaround。
+
+---
+
+## 三、🟡 中風險衝突（在 PR 中說明即可）
+
+### 衝突 D：expiry_filter 與 B-2 的互動
+
+| 項目 | 內容 |
+|------|------|
+| **提出者** | #8111e26（Issue #453）|
+| **緊急度** | 🟡 中風險 |
+| **狀態** | 上游已合併的變更 |
+
+**問題**：
+
+如果 B-2 在 MMR 之後插入，且 neighbor lookup 使用 MMR 輸出作為輸入，expired entries 不會出現在 MMR 輸出中。
+
+**對抗式 review 發現**：這裡有一個關鍵誤解——如果 B-2 的 neighbor lookup 是對每個 recall result 做**獨立的資料庫查詢**，則：
+- MMR 不影響 B-2 的 neighbor lookup 範圍
+- expiry_filter 只影響哪些 recall results 有機會被 B-2 擴展，不影響 B-2 找 neighbors 時是否找到 expired entries
+- 如果 B-2 的 `bm25Search()` 本身不过滤 expired entries（需要確認 store.bm25Search 是否有 `excludeInactive` 選項），則 expired neighbors 會被加入輸出
+
+**建議**：
+在 B-2 的 neighbor lookup 階段確認 store.bm25Search() 是否有 `excludeInactive` 選項。如果沒有，需要在查詢結果中自己過濾。
+
+---
+
+### 衝突 E：auto-supersede（#452）與 B-1 的 interaction
+
+| 項目 | 內容 |
+|------|------|
+| **提出者** | Sub-agent 衝突分析 |
+| **緊急度** | 🟡 中風險 |
+
+**問題**：
+
+#452 的 auto-supersede 讓相似 >0.95 的舊 entry 被標記為 superseded。但 B-1 的 `bm25Search()` 可能不會自動排除 superseded entries。
+
+**建議**：
+在 B-1 的 neighbor lookup 中確認 store.bm25Search() 是否有 `invalidated_at` filter。如果沒有，需要在查詢後自己做過濾。
+
+---
+
+### 衝突 F：temporal-awareness（#453）改變了 decay Engine 行為
+
+| 項目 | 內容 |
+|------|------|
+| **提出者** | Sub-agent 衝突分析 |
+| **緊急度** | 🟡 中風險 |
+
+**問題**：
+
+`temporalType: "dynamic"` 現在會觸發 3x faster decay。如果 B-2 的 neighbor 是 dynamic memory，decay 行為會改變嗎？
+
+**對抗式 review 發現**：這個問題可能不重要——B-2 neighbors 的 decay 行為應該與原始 recall results 完全一致，不需要特殊處理。只需確認 neighbors 的 `temporalType` 欄位有被正確設定。
+
+---
+
+### 衝突 G：pipeline 插入點的兩種說法
+
+| 說法 | 來源 | 內容 |
+|------|------|------|
+| AliceLJY | Issue #538 Q2 | 在 MMR 之後插入 |
+| jlin53882 | Issue #538 Comment 2 | 在 MMR 之前插入（避開去重問題）|
+
+**問題**：兩者的設計方向不同。維持誰的說法需要在 PR 中明確說明並向 maintainer 確認。
+
+---
+
+## 四、✅ 低風險衝突（在 PR 中說明即可）
+
+### 衝突 H：tier-manager 的 promotion 門檻
+
+`coreImportanceThreshold = 0.8`。與 Proposal A 的 feedback 機制相容，**✅ 無衝突**。
+
+---
+
+### 衝突 I：Scope boundary
+
+AliceLJY 說「neighbor enrichment 預設僅限相同 scope」。每個 recall result 用自己的 scope 找 neighbors，符合設計約束。**結論（可以自己決定）**：用 recall result 各自的 scope。
+
+---
+
+### 衝突 J：B-1 與 B-2 的依賴關係
+
+AliceLJY 先說「B-1 是 B-2 的驗證場」，後來又說「先聚焦 B-2，B-1 暫不重開」。**結論（可以自己決定）**：兩者完全獨立實作。
+
+---
+
+## 五、Claude Code Review Checklist 對抗式審查結果
+
+| 檢查項 | 結果 |
+|--------|------|
+| Schema 新增欄位 → 確認有對應實作讀取 | ✅ B-2 的 config flag 需要在 `parsePluginConfig()` 中解析 |
+| Pattern matching 函式 → 提供邊界條件測試 | ⚠️ `applyMMRDiversity` 的相似度 threshold 需要測試 |
+| 常數/函式定義 → 確認沒有被取代後遺留 | ✅ 無此問題 |
+| 改動範圍 → 只涵蓋需要修改的範圍 | ⚠️ 需要確認 B-2 真的只改 retriever.ts，不影響其他檔案 |
+| Error logging → 確認錯誤處理完整 | ⚠️ B-2 的 bm25Search/vectorSearch failure 需要 fail-safe |
+| 向後相容 → 確認沒有破壞性變更 | ✅ B-2 應該是 additive change（config flag 控制）|
+
+---
+
+## 六、需要馬上問 maintainer 的 3 個問題
+
+| 問題 | 緊急性 | 影響範圍 |
+|------|--------|---------|
+| **Q5（MMR 衝突）**：B-2 的 neighbor lookup 是對什麼做查詢？如果是對每個 recall result 做獨立資料庫查詢，MMR 完全不影響。請確認這個理解是否正確？ | 🔴 阻塞 | B-2 的核心設計 |
+| **Q6（vector-only）**：B-2 的 neighbor lookup 到底用 BM25 還是 vector search？如果是 vector search，vector-only path 完全不需要擔心 | 🔴 阻塞 | 實作完整性 |
+| **權力問題**：AliceLJY ✅ vs rwmjhb ❌ 誰有最終決定權？ | 🔴 阻塞 | 整個 Proposal B 能否往前推 |
+
+---
+
+## 七、可以自己決定的 6 個問題
+
+| 問題 | 決策 |
+|------|------|
+| Scope boundary | 用 recall result 各自的 scope |
+| B-2 input range | 只對 MMR 之後的 top-K results 做 enrichment |
+| Neighbors 附加方式 | 作為附屬上下文（`text + "\n\n--- Related ---\n" + neighbor.text`）|
+| Output 結構 | neighbors 只作為 injection context，不出現在 return 陣列 |
+| B-1 與 B-2 依賴 | 兩者完全獨立，可以先做 B-2 |
+| B-2 trigger | config flag 控制，預設 disabled |
+
+---
+
+## 八、實作前置條件檢查清單
+
+在實作 B-2 之前，請確認：
+
+- [ ] Q5（MMR 衝突）得到 maintainer 回覆，或確認「每個 recall result 獨立資料庫查詢」的設計理解是正確的
+- [ ] Q6（vector-only）得到 maintainer 回覆，或確認 B-2 用 vector search（而非 BM25）
+- [ ] 確認 store.bm25Search()/vectorSearch() 是否有 `excludeInactive` 選項
+- [ ] 確認 store.bm25Search() 是否有 `invalidated_at` filter 選項
+- [ ] 確認 B-2 config flag 的 schema 命名（`neighborEnrichment`？）
+- [ ] 確認 B-2 的 scope boundary 與 B-1 一致
+- [ ] 準備 benchmark（enrichment 前後 recall quality 對比）
+- [ ] 準備 B-2 的 fail-safe（bm25Search/vectorSearch failure 的錯誤處理）

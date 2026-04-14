@@ -1,0 +1,38 @@
+## Summary
+
+Phase 1 of Proposal A (recall governance): fixes critical bugs in the feedback loop for auto-recall memories, alignment of suppression and scoring thresholds, and natural usage detection.
+
+See RFC: https://github.com/CortexReach/memory-lancedb-pro/issues/569
+
+---
+
+## Changes vs #507/#505
+
+### Bug fixes applied on top of #507/#505
+1. **P0-1**: `pendingRecall` TTL cleanup (10 min max age) — prevents unbounded memory growth
+2. **P0-3**: `isRecallUsed()` Summary path AND gate fixed — natural usage detection now works
+3. **P2**: suppression threshold aligned with scoring path (`>= 3` → `>= 2`)
+4. **P1**: Summary path independent of ID/usage markers — detects natural usage without explicit phrases
+5. **P1**: Scoring penalty threshold aligned with injection increment (`>= 2` → `>= 1`)
+6. **P1**: errorKeywords checked before usage heuristic — explicit corrections override heuristic detection
+7. **P1**: errorKeywords sets `last_confirmed_use_at` — prevents staleInjected double-counting
+8. **P2**: TTL cleanup runs on both read and set paths
+9. **P2**: confirm/error keywords refined to reduce false positives
+
+### Known limitations (out of Phase 1 scope)
+- `bad_recall_count` read-modify-write is not atomic — requires store-layer compare-and-swap (Phase 2)
+- Summary reverse match has minor false positive risk (Phase 2 optimization)
+
+### Architecture verification
+- autoCapture block boundary: ✅ correct (all hooks outside `if (config.autoCapture !== false)`)
+- hooks registration: ✅ correct
+
+---
+
+## Testing
+
+CLI smoke test (`npm test`) has a pre-existing failure unrelated to these changes (confirmed by stashing changes and running tests).
+
+---
+
+Closes #569

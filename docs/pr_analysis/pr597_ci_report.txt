@@ -1,0 +1,37 @@
+## CI Status Analysis
+
+### CLI smoke test failure (cli-smoke)
+**Status**: Pre-existing upstream bug (NOT caused by this PR)
+
+- Error: `undefined !== 1` at cli-smoke.mjs:316
+- Root cause: Test mock missing `store.count()` method (#596)
+- Reference: Issue #596
+
+This failure also exists in `master` branch CI runs.
+
+### Core-regression test failure  
+**Status**: Under investigation
+
+- Error: smart-extractor-branches.mjs test assertion mismatch
+- Test file unchanged in this PR
+- May be Node version difference (local v24.13.0 vs CI v22.22.2) or pre-existing
+
+---
+
+## Codex Review Fixes Applied (Round 5)
+
+### P1 - Session cleanup bug (line 2611)
+When `sessionKey` is absent, `startsWith(':')` would match all keys.
+**Fix**: Use `sessionId` only when `sessionKey` is absent.
+
+### P1 - Summary matching (line 2554)
+Stored `item.line` includes prefix `- [category:scope]`, causing matching failure.
+**Fix**: Use `item.summary` (pure content only).
+
+### P2 - Zero config values (lines 3043-3046)
+`Number(fb.boostOnUse ?? 0) || 0.05` treats explicit `0` as falsy.
+**Fix**: Changed to `??` nullish coalescing.
+
+---
+
+✅ Committed: 64767ee

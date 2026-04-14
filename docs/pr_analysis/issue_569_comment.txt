@@ -1,0 +1,3 @@
+收到。請問這個 issue 應該 close 嗎？還是需要維護者回覆後再 close？
+
+@AliceLJY 這是關於 Issue #445 Proposal A 的後續確認。

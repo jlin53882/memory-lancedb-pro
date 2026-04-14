@@ -9,6 +9,7 @@
 
 | 類別 | 索引檔案 | 核心數量 |
 |------|---------|---------|
+| **單一 canonical 工作指南** | **docs/AI_WORKFLOW_MANUAL.md** | **全部整合在這裡** |
 | Minecraft 翻譯 | memory/TOPICS/minecraft-translator.md | 10 點 |
 | Flet 桌面應用 | memory/TOPICS/flet-desktop.md | 10 點 |
 | OpenClaw 設定 | memory/TOPICS/openclaw-config.md | 10 點 |

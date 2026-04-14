@@ -1,0 +1,72 @@
+**情況**：設計問題——涉及多個文件/子系統的更改
+
+**為什麼**：在編寫程式碼之前，需要先確定方法。具體實施方案取決於答案。
+
+---
+
+### 現況說明
+
+我正在處理 Issue #445 的 Proposal A（Dynamic Importance Feedback Signals）。Phase 1 ~ Phase 4 的實作已完成，但之前因為分支架構問題被關閉（PR #507/#505）。
+
+目前我在 fork (`jlin53882/memory-lancedb-pro`) 上有以下分支：
+
+| Branch | Phase | 最新 commit |
+|--------|-------|------------|
+| `feat/proposal-a-v3-clean` | Phase 1 | `649e90631b` |
+| `feat/proposal-a-v3-configurable-v2` | Phase 3 | `4ce42d63be` |
+| `feat/proposal-a-v3-tests` | Phase 4 | `52d822d080` |
+
+三個 PR 都 targeting master，各自獨立會改同一批檔案衝突。
+
+---
+
+### Phase 1-4 實作範圍
+
+| Phase | 內容 | 實作位置 |
+|-------|------|---------|
+| Phase 1 | agent_end hook + isRecallUsed() + importance delta 計算 | index.ts, reflection-slices.ts |
+| Phase 2 | min_recall_count + bad_recall_count increment | 未實作 |
+| Phase 3 | FeedbackConfigManager 參數化 | feedback-config.ts |
+| Phase 4 | 單元測試覆蓋 | test/*.test.mjs |
+
+---
+
+### 想請 AliceLJY 確認的事項
+
+#### 1. Stack Chain 的正確順序
+
+根據你之前的建議，三個 PR 應以 stack chain 方式提交：
+
+```
+CortexReach/memory-lancedb-pro:master
+  └── feat/proposal-a-v3-clean           (Phase 1) → PR
+      └── feat/proposal-a-v3-configurable-v2  (Phase 3) → PR
+          └── feat/proposal-a-v3-tests         (Phase 4) → PR #506
+```
+
+**請確認：**
+- Phase 1 的 base 為 official master，對嗎？
+- Phase 3 的 base 應為 Phase 1 branch？
+- Phase 4 的 base 應為 Phase 3 branch，等 Phase 3 合併後再 rebase 到 master？
+
+#### 2. Phase 1 → Phase 3 → Phase 4 的順序是對的嗎？
+
+目前 Phase 2（min_recall_count + bad_recall_count increment）尚未實作。
+
+**請確認：** 是否需要先實作 Phase 2？還是目前 Phase 1 → Phase 3 → Phase 4 的順序可以接受？
+
+#### 3. 與 official master 同步
+
+我的分支目前落後 official master。
+
+**請確認：** 重建 stack chain 之前，是否需要先 rebase 到最新的 official master？
+
+---
+
+### 等待回饋
+
+請確認以上三點。我會根據回覆重建正確的 stack chain，再陸續提交 PR。
+
+---
+
+Related to Issue #445

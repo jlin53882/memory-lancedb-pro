@@ -336,3 +336,459 @@ LEARNED: Sub-agent 完成後，main session 必須驗證 commit 正確性（git 
 **情境**：James 說「PR466」，我建立了 `pr466` branch，但 GitHub PR 的 head 其實是 `fix/autoRecallTimeoutMs-parse`，導致 force-push 沒有更新到正確的 PR。
 
 **Rule**：先 `gh api repos/owner/repo/pulls/N --jq '.head.ref'` 確認 head branch 真實名稱，再推送。
+
+
+---
+
+## 2026-04-09 — Proposal A 對抗性分析教訓
+
+### ❌ 做不好的事（Proposal A PR Chain 全軍覆沒）
+
+#### 1. PR chain 全部未合併進 official master — 實作從不存在
+**問題**：送出的 PR #493、#505、#507、#506 **全部是 closed 狀態**，從未進入 official master。整個 Proposal A 功能等於「不存在」。
+
+**根因**：
+- 每個 PR 都是獨立的 closed 狀態，沒有 merge
+- 誤以為「PR 在 chain 中 =遞進中」，但 chain 沒有 merge 就等於 0
+- 沒有在送 PR 前先確認 official master 是否已有相關程式碼
+
+**預防 Rule**：
+`
+Rule: 重要功能實作完成後，送 PR 前必須先確認 official master 包含該實作
+Rule: 收到「PR 準備就緒」時，先查詢 actual PR status，不依賴作者的 PR description
+Rule: PR chain 的有意義性 = 所有 PR 都 merged，否則等於沒做
+`
+
+---
+
+#### 2. bad_recall_count 只有 reset 沒有 increment — 核心邏輯是死程式碼
+**問題**：ad_recall_count 在官方 master 中只有 = 0，完全找不到任何 +1 實作。adCount >= 2 penalty 永遠不可能觸發。
+
+**根因**：
+- PR 中的實作從未合併進 official master
+- 也沒有在 official master 中驗證所有 code path 是否存在
+
+**預防 Rule**：
+`
+Rule: 實作複雜功能（multi-phase）時，每個 phase 完成後在官方程式碼庫驗證所有 code path
+Rule: 「程式碼存在於 PR」不等於「程式碼存在於 official master」
+`
+
+---
+
+#### 3. Phase 4 測試在測 mock 而非真實程式碼
+**問題**：eedback-config.test.mjs 和 ad-recall-count.test.mjs 在測試檔案內重新實作了 mock class，而非 import 真實程式碼。
+
+**根因**：
+- 不熟悉直接 import TypeScript source 的測試寫法
+- 認為「測試能跑 = 邏輯正確」，但跑的是 mock 不是真實 code
+
+**預防 Rule**：
+`
+Rule: 所有測試檔案的 import 語句必須指向真實 source path，不得在測試檔案中重新實作邏輯
+Rule: 測試完成後，用 git grep 確認測試檔案內的 function 真的來自 source
+Rule: 若某 function 在 source 中不存在，測試應該 FAIL 而不是 PASS
+`
+
+---
+
+#### 4. autoCapture block boundary 導致 hooks 被錯誤停用
+**問題**：if (config.autoCapture !== false) 區塊未正確關閉，導致 selfImprovement 等無關功能被意外停用。
+
+**根因**：
+- 大區塊的 conditional 掛程式碼，沒有精確確認 scope 閉合
+- PR #505 聲稱已修復，但 PR #505 是 closed 未合併（等於沒修）
+
+**預防 Rule**：
+`
+Rule: 修改 conditional block 時，用程式碼折疊或註解標記 block 邊界
+Rule: 「PR 聲稱已修復 bug」不等於「bug 已修復」—— 必須確認該 PR 已 merged
+`
+
+---
+
+#### 5. Summary match 缺少 hasUsageMarker 檢查 — false positive
+**問題**：Summary branch 直接 return true（>=10 字元 verbatim match），沒有 second-factor 驗證。
+
+**根因**：實作時只考慮 Happy Path，沒有考慮「巧合包含」的邊界情況。
+
+**預防 Rule**：
+`
+Rule: 所有 match/確認邏輯，都要有 second-factor 驗證（如 AND gate：ID match + marker phrase）
+Rule: 實作 match 邏輯後，主動思考「什麼情況會錯誤觸發」，再補防禦性檢查
+`
+
+---
+
+#### 6. id[-:] pattern 造成過度匹配
+**問題**：id-abc123 這類常見 ID 格式會讓 AND 邏輯退化成只有 ID check。
+
+**根因**：regex pattern 包含常見字元，沒有考慮實際部署中的常見格式。
+
+**預防 Rule**：
+`
+Rule: 設計 ID/marker matching regex 時，測試常見的真實世界格式（email、URL、ID 等）
+Rule: 如果 regex 無法區分「意圖使用」和「巧合提到」，就改用更嚴格的 matching 條件
+`
+
+---
+
+#### 7. injected_count 單向膨脹無 cap
+**問題**：injected_count++ 只增不減，長期運行後 metadata 可能 bloat。
+
+**根因**：實作時只考慮功能正確性，沒有考慮長期運行的資源管理。
+
+**預防 Rule**：
+`
+Rule: 實作任何 counter/accumulator 時，同時實作上限邏輯（cap / decay / reset）
+Rule: 發現新專案中沒有某種 cap 機制時，主動提出是否需要加入
+`
+
+---
+
+#### 8. importance floor (0.1) 與 Decay floor (0.5~0.9) 設計矛盾
+**問題**：Feedback 系統的 importance floor 是 0.1，但 Decay engine 的 tier floor 是 0.5~0.9。Core tier 記憶被降到 0.1 時，decay 和 importance 脫鉤。
+
+**根因**：
+- feedback 系統和 decay 系統由不同提案/不同人設計
+- 沒有在整合前確認兩個系統的 floor 值是否相容
+
+**預防 Rule**：
+`
+Rule: 跨系統整合（feedback + decay）前，確認雙方的 key parameter（floor、threshold、cap）是否相容
+Rule: 若發現兩個系統的設計假設矛盾，先問 AliceLJY（維護者）裁決再實作
+`
+
+---
+
+#### 9. PR 中混入無關 bugfixes
+**問題**：PR #507 混入了 5 個與 feedback feature 無關的 bugfixes（如 rerankApiKey env resolution），被 AliceLJY 要求分離。
+
+**根因**：貪圖方便，把所有修改放進同一個 PR。
+
+**預防 Rule**：
+`
+Rule: 一個 PR 一個 concern，無關的 bugfix 一定要分離
+Rule: 送出 PR 前，用 git diff --stat 確認所有變更都與 PR 目的相關
+`
+
+---
+
+### ✅ 做得好的事
+
+#### 1. 用對抗性 Code Review 發現 P0 級別問題
+**做法**：用 Claude Code CLI 對抗審查，一次發現 5+ 個 P0/P1 問題，其中 ad_recall_count 從未 increment 是完全没想到的 critical bug。
+
+**可複用規則**：
+`
+Rule: 重要 PR 送出前，必須經過對抗性 review（由另一個 agent/CLI 檢視）
+Rule: 對抗性 review 不只檢查實作，也要檢查：官方程式碼庫是否已有、測試是否測真實 code、邏輯是否矛盾
+`
+
+#### 2. 用交叉比對發現 PR 從未合併
+**做法**：同時查閱 PR status 頁面和 official master 程式碼，發現「PR chain 存在但全部 closed」的矛盾。
+
+**可複用規則**：
+`
+Rule: 「PR 存在」不等於「實作存在」，必須查閱 official master 驗證
+Rule: 收到 PR 準備就緒訊息時，主動查詢 actual status 而非假設
+`
+
+---
+
+### 📐 Proposal A 專用規則（蒸餾）
+
+| # | 規則 | 觸發時機 |
+|---|------|----------|
+| PA1 | PR chain 的有意義性 = 所有 PR 都 merged，否則等於 0 | 任何 PR chain |
+| PA2 | 實作完成後送 PR 前，確認 official master 包含該實作 | 送 PR 前 |
+| PA3 | 測試檔案 import 必須指向真實 source，不得在測試檔案中重新實作 | 寫測試時 |
+| PA4 | match 邏輯要有 second-factor 驗證（AND gate） | 實作 match 時 |
+| PA5 | counter/accumulator 同時實作 cap/decay/reset | 實作計數器時 |
+| PA6 | 跨系統整合前，確認 key parameter（floor/threshold/cap）是否相容 | 系統整合前 |
+| PA7 | 一個 PR 一個 concern，無關 bugfix 分離 | 準備送 PR 前 |
+| PA8 | 發現 bug fix claim 先查 PR status 是否 merged，而非假設已修復 | 收到「已修復」時 |
+| PA9 | 對抗性 review 不只檢查實作，也要檢查：official code、測試真實性、邏輯矛盾 | PR 送出前 |
+
+---
+
+### 🚩 需要與 AliceLJY 確認的 5 個問題（來自對抗分析）
+
+1. **「失敗的 recall 應該在哪個環節被偵測並遞增 bad_recall_count？」** — Phase 1 的核心實作細節
+2. **「FeedbackConfigManager 和 Phase 4 單元測試檔是否應該進入 official master？」** — PR scope 確認
+3. **「Decay floor (0.5-0.9) vs Feedback floor (0.1) 的矛盾是否可接受？還是需要對齊？」** — 高層次設計取捨
+4. **「Scope 是否需要限制 feedback 的應用範圍？」（跨 scope 干擾風險）** — 系統邊界
+5. **「autoCapture: false 時，哪些 hooks 應該繼續運行，哪些應該停用？」** — 功能開關範圍
+
+
+## [LRN-20260409-001] best_practice
+
+**Logged**: 2026-04-09T16:03:49.095Z
+**Priority**: medium
+**Status**: triage
+**Area**: config
+
+### Summary
+Investigate last failed tool execution and decide whether it belongs in .learnings/ERRORS.md.
+
+### Details
+The reflection pipeline fell back; confirm the failure is reproducible before treating it as a durable error record.
+
+### Suggested Action
+Reproduce the latest failed tool execution, classify it as triage or error, and then log it with the appropriate tool/file path evidence.
+
+### Metadata
+- Source: memory-lancedb-pro/reflection:memory\reflections\2026-04-09\160348806-dc-channel--1476866394556465252-aa7f2b7f-4abe-4ba3-9b93-eda09d66.md
+---
+
+
+## [LRN-20260409-002] best_practice
+
+**Logged**: 2026-04-09T16:44:13.943Z
+**Priority**: medium
+**Status**: triage
+**Area**: config
+
+### Summary
+Investigate last failed tool execution and decide whether it belongs in .learnings/ERRORS.md.
+
+### Details
+The reflection pipeline fell back; confirm the failure is reproducible before treating it as a durable error record.
+
+### Suggested Action
+Reproduce the latest failed tool execution, classify it as triage or error, and then log it with the appropriate tool/file path evidence.
+
+### Metadata
+- Source: memory-lancedb-pro/reflection:memory\reflections\2026-04-09\164413854-dc-channel--1476866394556465252-ff612f37-49b7-4695-86c0-d74d4d71.md
+---
+
+
+## [LRN-20260413-001] correction
+
+**Logged**: 2026-04-13T06:05:18.586Z
+**Priority**: high
+**Status**: pending
+**Area**: backend
+
+### Summary
+Codex round-5 找到 3 個新問題（P1 x2 + P2）
+
+### Details
+Codex adversarial review found 3 new issues in PR #597: (1) P1 session cleanup bug - when sessionKey is absent, startsWith(':') matches all keys causing cross-session data loss; (2) P1 summary matching - stored item.line includes prefix causing matching failure; (3) P2 zero config - || treats explicit 0 as falsy instead of preserving it
+
+### Suggested Action
+-
+
+### Metadata
+- Source: memory-lancedb-pro/self_improvement_log
+---
+
+
+## [LRN-20260413-002] best_practice
+
+**Logged**: 2026-04-13T14:09:22.965Z
+**Priority**: medium
+**Status**: triage
+**Area**: config
+
+### Summary
+Investigate last failed tool execution and decide whether it belongs in .learnings/ERRORS.md.
+
+### Details
+The reflection pipeline fell back; confirm the failure is reproducible before treating it as a durable error record.
+
+### Suggested Action
+Reproduce the latest failed tool execution, classify it as triage or error, and then log it with the appropriate tool/file path evidence.
+
+### Metadata
+- Source: memory-lancedb-pro/reflection:memory\reflections\2026-04-13\140922949-dc-channel--1476866394556465252-a2bcfad1-76f8-48b7-8ac7-4b8ac228.md
+---
+
+
+## [LRN-20260413-003] best_practice
+
+**Logged**: 2026-04-13T14:44:00.500Z
+**Priority**: low
+**Status**: pending
+**Area**: config
+
+### Summary
+Session-start greeting produces minimal context for downstream reflection generation
+
+### Details
+The greeting exchange ("準備好了！今天想做什麼？") is functional but yields no durable context, decisions, or user-model data. A reflective prompt or lightweight context-gathering step at session start could improve reflection depth.
+
+### Suggested Action
+Consider adding a lightweight context prompt on session start to capture user goals or recent work before moving to open-ended inquiry.
+
+### Metadata
+- Source: memory-lancedb-pro/reflection:memory\reflections\2026-04-13\144305957-dc-channel--1476866394556465252-11d4f60f-8638-4e8f-a20a-d4b4ae95.md
+---
+
+
+## [LRN-20260413-004] best_practice
+
+**Logged**: 2026-04-13T15:58:59.625Z
+**Priority**: medium
+**Status**: pending
+**Area**: config
+
+### Summary
+coding-agent skill path inconsistency between workspace setups
+
+### Details
+On 2026-04-12, coding-agent skill ENOENT error occurred because the SKILL.md path was pointing to a wrong directory. The skill resides under the workspace's skills directory with a specific path structure. Spawning sub-agents requires correct skill path resolution.
+
+### Suggested Action
+Add skill path validation step before spawning; consider a diagnostic command in the coding-agent skill to verify path existence.
+
+### Metadata
+- Source: memory-lancedb-pro/reflection:memory\reflections\2026-04-13\155807920-dc-channel--1476866394556465252-ad033fbc-249d-4e34-b0f0-2b0075ef.md
+---
+
+
+## [LRN-20260413-005] best_practice
+
+**Logged**: 2026-04-13T16:50:36.265Z
+**Priority**: medium
+**Status**: triage
+**Area**: config
+
+### Summary
+Investigate last failed tool execution and decide whether it belongs in .learnings/ERRORS.md.
+
+### Details
+The reflection pipeline fell back; confirm the failure is reproducible before treating it as a durable error record.
+
+### Suggested Action
+Reproduce the latest failed tool execution, classify it as triage or error, and then log it with the appropriate tool/file path evidence.
+
+### Metadata
+- Source: memory-lancedb-pro/reflection:memory\reflections\2026-04-13\165004533-dc-channel--1476866394556465252-b82051ef-d715-4dac-b937-63fb2f47.md
+---
+
+
+## [LRN-20260414-001] best_practice
+
+**Logged**: 2026-04-14T08:50:01.432Z
+**Priority**: high
+**Status**: pending
+**Area**: infra
+
+### Summary
+Add startup/early-warning check for LLM provider availability before entering slow reflection generation paths
+
+### Details
+When `generateReflectionText()` is called with no valid LLM API keys and CLI fallback also fails, it silently falls through to a ~58 second fallback path. This was discovered only via detailed timing instrumentation. A proactive check would save ~58 seconds per session start.
+
+### Suggested Action
+Add a `detectAvailableLLMProvider()` check in `BootstrapManager` or reflection startup that warns or fails fast if no LLM is available.
+
+### Metadata
+- Source: memory-lancedb-pro/reflection:memory\reflections\2026-04-14\084841413-dc-channel--1476866394556465252-f27c3142-7c47-4907-b12b-2404a3b0.md
+---
+
+
+## [LRN-20260414-002] best_practice
+
+**Logged**: 2026-04-14T08:57:39.820Z
+**Priority**: low
+**Status**: pending
+**Area**: config
+
+### Summary
+Session greeting flow - no prior context, fresh start
+
+### Details
+New session initiated. No prior conversation context loaded. Human greeted casually in Chinese. Assistant identity referred to as "James" by user.
+
+### Suggested Action
+Await user direction on what topic or task to take up
+
+### Metadata
+- Source: memory-lancedb-pro/reflection:memory\reflections\2026-04-14\085639852-dc-channel--1476866394556465252-3d67a80e-1ab1-4a5d-907d-f75399fc.md
+---
+
+
+## [LRN-20260414-003] best_practice
+
+**Logged**: 2026-04-14T10:48:05.900Z
+**Priority**: medium
+**Status**: pending
+**Area**: config
+
+### Summary
+Codify `??` vs `||` config coalescing rule into a checklist item for code review
+
+### Details
+The P2 bug where `0` as config value was treated as falsy required multi-agent review to catch. This is a recurring pitfall with known fix pattern — worth adding to review checklist.
+
+### Suggested Action
+Add config coalescing rule to code review checklist in skills/code-review/SKILL.md
+
+### Metadata
+- Source: memory-lancedb-pro/reflection:memory\reflections\2026-04-14\104701901-dc-channel--1476866394556465252-c6e012d6-9ddd-44ff-86ce-298bd39f.md
+---
+
+
+## [LRN-20260414-004] best_practice
+
+**Logged**: 2026-04-14T11:19:44.765Z
+**Priority**: low
+**Status**: pending
+**Area**: config
+
+### Summary
+No substantive session content to derive learnings from yet.
+
+### Details
+This reflection is a baseline entry for a fresh session with no work performed.
+
+### Suggested Action
+Populate on next meaningful interaction once user task is established.
+
+### Metadata
+- Source: memory-lancedb-pro/reflection:memory\reflections\2026-04-14\111918913-dc-channel--1476866394556465252-d70c69be-55be-4ad8-959c-2df7b29e.md
+---
+
+
+## [LRN-20260414-005] best_practice
+
+**Logged**: 2026-04-14T11:54:37.499Z
+**Priority**: low
+**Status**: pending
+**Area**: config
+
+### Summary
+Track which MiniMax model variant is selected per session for post-session analysis.
+
+### Details
+The runtime shows model=M2.7-highspeed being used for this session. No durable record of model selection rationale or performance was captured.
+
+### Suggested Action
+Consider logging model selection to session metadata for future model comparison and performance tracking.
+
+### Metadata
+- Source: memory-lancedb-pro/reflection:memory\reflections\2026-04-14\115314948-dc-channel--1476866394556465252-7cfa3bbd-5d2e-4866-8703-98517193.md
+---
+
+
+## [LRN-20260414-006] best_practice
+
+**Logged**: 2026-04-14T12:09:29.149Z
+**Priority**: low
+**Status**: pending
+**Area**: config
+
+### Summary
+Track model preference M2.7-highspeed as default for this deployment
+
+### Details
+Assistant logged on with M2.7-highspeed model after reset; this may indicate a preferred model configuration for the 客廳電腦-家豪 host
+
+### Suggested Action
+Consider documenting host-specific model preferences in workspace config for session initialization
+
+### Metadata
+- Source: memory-lancedb-pro/reflection:memory\reflections\2026-04-14\120846176-dc-channel--1476866394556465252-ed3bc906-8549-4c54-a3eb-c405d2d5.md
+---

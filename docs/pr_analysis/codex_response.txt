@@ -1,0 +1,7 @@
+Both issues fixed in commit 3d9f27d:
+
+1. **P1 - autoCapture closing brace**: The `if (config.autoCapture !== false)` block (agent_end auto-capture, line 2625) was missing its closing brace after the Phase 1 hooks were added. Added `}` after the Phase 1 before_prompt_build hook (priority 5) to properly close the block. Self-improvement, reflection, and lifecycle hooks now run independently of autoCapture.
+
+2. **P2 - feedback config type coercion**: Added `Number()` coercion for all numeric feedback config values (boostOnUse, penaltyOnMiss, boostOnConfirm, penaltyOnError) to prevent string concatenation when values are provided as strings via env-driven config.
+
+Codex review round 4 addressed. Thanks!

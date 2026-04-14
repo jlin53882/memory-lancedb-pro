@@ -1,0 +1,80 @@
+## B-2 方向確認收到，追加 3 個實作缺口 + 2 個流程問題
+
+@rwmjhb @AliceLJY 謝謝 Q1-Q4 的詳細答案，B-2 的實作方向現在非常清晰。基於這些確認，我們整理出 5 個在實作前需要先確定的點：
+
+---
+
+### Q5：MMR 去重是否會消滅 neighbors？【🔴 阻塞】
+
+B-2 的插入點在 `applyMMRDiversity` 之後，但 MMR 的核心功能就是「對相似的 items 去重」。如果某個 neighbor 與 MMR 選中的 result 相似度過高，**MMR 已經在去重階段把它刪掉了**。
+
+執行流程：
+```
+applyMMRDiversity(top-K)
+  → 相似 items 被刪除，某些潛在 neighbors 也消失
+  → B-2 在 MMR 這時才插入，只對「還活著的」items 找 neighbors
+  → 被 MMR 刪掉的 neighbors 永遠找不到
+```
+
+**問題**：neighbor enrichment 是在 MMR 去重**前**還是**後**執行？如果在 MMR 之後，是否有補救機制找回被 MMR 預先刪掉的潛在 neighbors？還是 MMR 的 threshold 設定讓這個問題在實務上不存在？
+
+---
+
+### Q6：`vectorOnlyRetrieval()` 路徑的 B-2 如何實作？【🔴 阻塞】
+
+B-2 流程圖是基於 `hybridRetrieval()`：
+- ✅ hybrid path 有 `bm25Search()` → 可直接對 recall results 做 neighbor lookup
+- ❌ `vectorOnlyRetrieval()` **沒有 BM25 search 階段** → 如何找 neighbors？
+
+**問題**：B-2 是否只實作在 hybrid path？vector-only path 是否需要不同的 neighbor 實作方式（例如用 vector search 做 neighbor lookup）？還是 vector-only path 暫時不實作 B-2，只做 hybrid path？
+
+---
+
+### Q7：Neighbor search 的 scope boundary 如何決定？
+
+所有流程圖都假設 neighbor 在「同一個 scope 內」找，但沒有定義邊界：
+
+- **以 recall result 的 scope 為準**？每個 result 各自在自己的 scope 內找 neighbor
+- **以 query 本身的 scope 為準**？所有 neighbors 都用 query 的 scope filter
+- **跨 scope 的 recall results**：neighbor search 的 scope filter 用哪一個？
+
+---
+
+### Q8：B-2 的 Phase 4 依賴關係被跳過，觸發條件是否重新定義？【🟡 需確認】
+
+依據 Issue #445 的設計文件，B-2（全域 Retrieval 鄰居擴展）原為 **Phase 4**：
+
+> **觸發條件**：Phase 1（B-1 reflection neighbor enrichment）運行 1 個月無異常
+
+但目前的方向是「先聚焦 B-2，B-1 暫不重開」。這意味著：
+- B-2 的觸發條件從「B-1 穩定 1 個月」變成了「直接實作」
+- 缺少了 Phase 1 的實證基礎
+
+**問題**：B-2 的觸發條件是否需要重新定義（例如改為「上線後觀察 X 週」）？還是這個 Phase 4 依賴關係已被放棄？
+
+---
+
+### Q9：BM25 neighbor lookup 的輸入範圍？Neighbors 如何附加？【🟡 需確認】
+
+維護者確認「用 BM25 找 neighbors」，但細節未定義：
+
+- **Input scope**：對所有 recall results 找 neighbors？還是只對 MMR 過濾後的 top-K？
+- **Neighbors 的數量**：每個 result 找固定 topK=2 嗎？
+- **附加方式**：
+  - A. 作為附屬上下文（`enriched.text = original.text + "\n\nNeighbors: ..."`）
+  - B. 作為額外候選列表（`results = [...topK, ...neighbors]`）
+  - C. 其他？
+- **Output 結構**：最終 return 的 items 是否包含 neighbors？還是 neighbors 只作為 injection context 不出現在 return 中？
+
+---
+
+### 建議的 Next Steps
+
+```
+1. 確認 Q5-Q9（本次回覆）
+2. 開啟 B-2 實作 issue（包含 neighbor scope、input range、附加方式等設計決策）
+3. Implementation PR + benchmark（enrichment 前後 recall quality 對比）
+4. Review → Merge
+```
+
+確定這 5 個點之後就可以開始實作，謝謝！

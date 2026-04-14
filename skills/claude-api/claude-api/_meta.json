@@ -1,0 +1,8 @@
+{
+  "ownerId": "james53882",
+  "slug": "claude-api",
+  "version": "1.0.0",
+  "publishedAt": 1743936000000,
+  "description": "透過 subprocess 呼叫 Claude Code CLI 進行 code review、程式碼分析與編碼任務，支援 minimax 模型、環境變數設定、自訂 system prompt",
+  "clawhubUrl": "https://clawhub.com/claude-api"
+}

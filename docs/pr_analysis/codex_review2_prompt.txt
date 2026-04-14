@@ -1,0 +1,20 @@
+你是記憶系統專業架構師。請對 memory-lancedb-pro Phase 1 實作（已更新的 index.ts 和 reflection-slices.ts）做對抗性審查。
+
+## 修復後的程式碼邏輯
+
+### isRecallUsed() (reflection-slices.ts)
+1. ID path：`hasSpecificRecall` AND `hasUsageMarker` → return true
+2. Summary path（已移除 AND gate）：任何 injected summary 文字與回覆有 ≥10 字元重疊 → return true
+
+### suppression threshold (index.ts)
+- Line ~2517：`shouldSuppress = nextBadRecallCount >= 2 && minRepeated > 0`（已與 scoring path >= 2 對齊）
+
+### pendingRecall TTL cleanup (index.ts)
+- 10 分鐘 TTL cleanup，防止記憶體洩漏
+
+## 請重點檢查
+1. 修復後的 Summary path 邏輯是否正確？有無其他 edge case？
+2. suppression threshold 對齊後，第二次 bad recall 時的完整流程是什麼？
+3. 有無其他我們遺漏的 Phase 1 問題？
+
+請用繁體中文輸出，標明 P0/P1/P2。

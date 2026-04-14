@@ -109,6 +109,27 @@ Sub-agent 完成後，main session 必須依序執行：
 
 ---
 
+## 記憶與資料品質規則
+
+### 規則 1 — 雙層記憶儲存
+每個踩坑/經驗教訓 → 立即儲存兩條記憶：
+- **技術層**：`踩坑：[現象]。原因：[根因]。修復：[方案]。預防：[如何避免]`（category: fact, importance >= 0.8）
+- **原則層**：`決策原則 ([標籤])：[行為規則]。觸發：[何時]。動作：[做什麼]`（category: decision, importance >= 0.85）
+
+### 規則 2 — LanceDB 資料品質
+條目必須簡短且原子化（< 500 字元）。不儲存原始對話摘要或重複內容。
+
+### 規則 3 — 重試前先回憶
+任何工具呼叫失敗時，必須先用 `memory_recall` 搜尋相關關鍵字，再重試。
+
+### 規則 4 — 確認目標程式碼庫
+修改前確認操作的是 `memory-lancedb-pro` 還是內建 `memory-lancedb`。
+
+### 規則 5 — 修改外掛程式碼後清除 jiti 快取
+修改 `plugins/` 下的 .ts 檔案後，必須先清除 `/tmp/jiti/` 目錄再重啟 openclaw gateway。
+
+---
+
 ## 常用路徑參照
 
 | 用途 | 路徑 |
@@ -130,3 +151,31 @@ Sub-agent 完成後，main session 必須依序執行：
 ---
 
 *本檔案與 SOUL.md 共同構成 workspace 的完整行為準則。*
+
+## graphify
+
+本專案有兩個 graphify 知識圖譜：
+
+1. **記憶圖譜**（主要）：`memory/graphify-out-memory/`
+   - 涵蓋：memory 目錄（所有對話記憶、每日日誌、進化報告、自我審計）
+   - **回答架構/記憶相關問題前，先讀** `memory/graphify-out-memory/GRAPH_REPORT.md`
+   - 查詢圖譜：`graphify query "..." --graph memory/graphify-out-memory/graph.json`
+
+2. **原始碼圖譜**：`graphify-out/`
+   - 涵蓋：OpenClaw 原始碼結構
+
+Rules:
+- 回答架構相關問題前，先讀 `memory/graphify-out-memory/GRAPH_REPORT.md` 了解社群結構
+- 理解陌生程式碼結構前，用 `agentlens` 或直接讀 `graphify-out/GRAPH_REPORT.md`
+
+
+## ⛔ PR 任務防呆（通用，適用所有專案）
+
+收到 PR 任務時，**第一時間確認目標 remote，再執行**：
+
+1. 執行 `git remote -v` 確認當前 repo 的 remote
+2. 若 remote 不是自己的 fork → 停下來，回報：「預計在 <remote> 開分支，是否正確？」
+3. 等家豪確認後再執行 git 操作
+
+**杜絕**：還沒確認就自己猜測 remote、導致需要重新砍分支重來。
+

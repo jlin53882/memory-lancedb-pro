@@ -1,0 +1,45 @@
+你是記憶系統的專業架構師。請對以下 Proposal A 實作方案進行對抗性審查，用繁體中文回覆。
+
+## 背景
+這是 memory-lancedb-pro 的 feature PR 方案，需要提交進官方 CortexReach/memory-lancedb-pro master。
+
+## 方案內容
+
+### Stack Chain 架構
+Phase 1 → Phase 3 → Phase 4，每個 PR 以上一個 phase branch 為 base。
+
+### Phase 1 實作（來自 commit log）
+- agent_end hook (priority 20)：捕捉 agent 回應寫入 pendingRecall Map
+- before_prompt_build hook (priority 5)：在下個 turn 評分 recall 使用情況
+- session_end hook (priority 20)：清理 pendingRecall entries
+- isRecallUsed() AND logic（ID + marker 都要存在才算確認使用）
+- Per-recall scoring（每個 recallId 單獨計分，不互相污染）
+- sessionKey:agentId composite key（防止跨 agent 干擾）
+- bad_recall_count increment（在 error/miss path 中遞增）
+
+### 與 #507 的變更摘要
+- session_end hook 清理 composite keys 防止 memory leak
+- AND logic + bad_recall_count increment fix
+- bad_recall threshold 從 3 改為 2（符合 spec）
+- per-recall scoring 修正、event.messages user prompt、agentId keying
+- 4 個 feedback hooks bugs 修復
+
+### 已知的問題（提交 PR 前需要修復）
+1. autoCapture block boundary：if (config.autoCapture !== false) 的 } 需要確認正確閉合
+2. Phase 4 測試在測 mock 而非真實程式碼
+3. Summary match 缺少 hasUsageMarker AND gate
+4. 配置覆寫靜默失敗（confirmKeywords/errorKeywords 傳入 non-array 時 .some() 會失敗）
+
+## 請對抗性審查以下問題
+
+1. 設計漏洞：Phase 1 的 hooks 是否有 edge cases 未考慮？bad_recall_count increment 在 concurrent session 下是否有 race condition？
+
+2. 實作風險：before_prompt_build 的 timing 是否正確？session_end 沒被觸發時 pendingRecall 會記憶體洩漏嗎？
+
+3. 與官方程式碼整合：rebase 到最新 master 後最可能發生衝突的檔案是哪些？
+
+4. 遺漏問題：這個方案有哪些我沒有注意到的問題？
+
+5. 安全性：是否有安全疑慮（memory bloat、DoS）？
+
+請用繁體中文輸出，每個問題都要有分析。最後標明：P0 必須修復才能繼續的問題、P1 強烈建議修復的問題、P2 可以接受但建議關注的問題。

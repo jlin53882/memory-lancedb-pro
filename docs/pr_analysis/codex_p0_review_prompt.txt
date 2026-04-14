@@ -1,0 +1,64 @@
+你是專業的程式碼安全審查員。請對 memory-lancedb-pro 的 Phase 1 實作做全面的對抗性審查。
+
+## 審查範圍
+
+### 主要修改檔案
+1. `index.ts`（修改內容）
+2. `src/reflection-slices.ts`（修改內容）
+
+### 請詳細檢查以下內容
+
+#### 1. pendingRecall TTL cleanup（P0-1 fix）
+在 `index.ts` 中搜尋 `cleanupPendingRecall` 函式：
+- TTL 10 分鐘的選擇是否合理？
+- cleanup 邏輯是否完整？有沒有遺漏的呼叫點？
+- 在 module load 時呼叫 cleanup 是否安全？
+
+#### 2. bad_recall_count race condition（P0-2 fix）
+在 `index.ts` 中搜尋 `bad_recall_count` 的讀寫模式：
+- 讀取 (`meta.bad_recall_count`) 和寫入 (`patchMetadata`) 的時序
+- 在並發場景下（多個 session 同時對同一個 memory id 呼叫），是否會有 lost update？
+- 建議一個具體的修復方案（可以在目前的架構下實作的，不是需要 store-layer 改變的）
+
+#### 3. isRecallUsed() AND gate（P0-3 fix）
+在 `src/reflection-slices.ts` 中檢查 isRecallUsed 函式：
+- 新的 AND gate 邏輯是否正確？
+- hasUsageMarker 陣列的關鍵字是否完整？有沒有會造成 false positive 的關鍵字？
+- "that's not right" 這個 false positive 有沒有被修復？
+- summary path 的 AND gate 邏輯是否與 ID path 一致？
+
+#### 4. Hook registration 審查
+在 `index.ts` 中檢查 Proposal A hooks：
+- `agent_end` (priority 20) 的邏輯是否正確？
+- `before_prompt_build` (priority 5) 的邏輯是否正確？
+- `session_end` 的 cleanup 是否完整？
+- autoCapture 設為 false 時，這些 hooks 是否正常運作？
+
+#### 5. 其他審查點
+- pendingRecall Map 的併發安全（Map 是 JS 原生的，是否有併發問題？）
+- `containsKeyword` 函式的實作是否有問題？
+- `isConfirmKeyword` / `isErrorKeyword` 的關鍵字列表是否有問題？
+- `parseSmartMetadata` 的回傳型別是否正確？
+- 任何其他你發現的 hidden bug 或 edge case
+
+## 輸出格式
+
+請用繁體中文輸出：
+
+```
+## P0-2 修復建議
+[具體的修復程式碼或方向]
+
+## 發現的問題
+1. [問題名稱]
+   - 位置：[檔案:行號]
+   - 問題描述：[詳細說明]
+   - 嚴重程度：[P0/P1/P2]
+   - 修復建議：[如何修復]
+
+## 其他審查發現
+[其他問題]
+
+## 總結
+[P0 必須修復的列表]
+```

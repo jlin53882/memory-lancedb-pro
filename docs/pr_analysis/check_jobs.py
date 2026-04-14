@@ -1,0 +1,6 @@
+import json, subprocess, os
+
+r = subprocess.run(['gh', 'api', 'repos/CortexReach/memory-lancedb-pro/actions/runs/24325234693/jobs'], capture_output=True, timeout=30)
+data = json.loads(r.stdout)
+for job in data.get('jobs', []):
+    print(f'{job["name"]}: {job["conclusion"]} (id={job["id"]})')

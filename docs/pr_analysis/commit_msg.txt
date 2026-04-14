@@ -1,0 +1,17 @@
+fix(proposal-a): P1 restore autoCapture closing brace + P2 coerce feedback config types
+
+P1 (Codex review round 4):
+- The second `if (config.autoCapture !== false)` block (agent_end auto-capture)
+  was missing its closing brace. Phase 1 hooks were added inside this block
+  but the block was never closed, causing ALL subsequent hooks
+  (self-improvement, reflection, lifecycle, backup) to be conditional on autoCapture.
+  Added closing `}` after the Phase 1 before_prompt_build hook (priority 5)
+  to properly close the autoCapture block.
+
+P2 (Codex review round 4):
+- Feedback config values (boostOnUse, penaltyOnMiss, etc.) were used directly
+  without Number() coercion. If deployment provides values as strings
+  (common with env-driven config), Math.min/Math.max would produce NaN.
+  Added Number() coercion with fallback to default values.
+
+Both fixes resolve the two issues flagged by Codex in PR review.

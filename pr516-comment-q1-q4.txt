@@ -1,0 +1,16 @@
+@AliceLJY @rwmjhb
+
+PR #516 目前有幾個需要你們確認的事項，請幫我們解答：
+
+**Q1（阻塞）— autoRecallExcludeAgents 雙用途設計**
+- AliceLJY 的建議：接受雙用途，維持現有 autoRecallExcludeAgents 欄位
+- rwmjhb 的建議：拆分成 reflectionExcludeAgents，明確區分兩個用途
+- 這兩個方向的 config schema 不同，需要在實作前確認
+- **請問我應該採納哪個方向？**
+
+**Q4 — Wildcard prefix 的 dash 問題**
+- rwmjhb 提到 wildcard pattern（如 `pi-`）會把 dash 也 strip，導致排除範圍過大
+- 目前實作：`p.slice(0, -1)` 會把末碼 dash 也吃掉
+- **請問正確的 wildcard 語法應該是什麼？**
+
+謝謝！
