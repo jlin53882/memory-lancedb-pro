@@ -1637,10 +1637,13 @@ const memoryLanceDBProPlugin = {
       api.logger.debug?.("memory-lancedb-pro: register() called again — skipping re-init (idempotent)");
       return;
     }
-    // Note: Map.set(api, true) is called AFTER successful init
 
-    // Parse and validate configuration
-    const config = parsePluginConfig(api.pluginConfig);
+    // Claim registration BEFORE init to close the re-entry race window (F2 fix)
+    _registeredApis.set(api, true);
+
+    try {
+      // Parse and validate configuration
+      const config = parsePluginConfig(api.pluginConfig);
 
     const resolvedDbPath = api.resolvePath(config.dbPath || getDefaultDbPath());
 
@@ -2116,9 +2119,6 @@ const memoryLanceDBProPlugin = {
         enableSelfImprovementTools: config.selfImprovement?.enabled !== false,
       }
     );
-
-    // Mark as successfully initialized - only called after all init completes
-    _registeredApis.set(api, true);
 
     // Auto-compaction at gateway_start (if enabled, respects cooldown)
     if (config.memoryCompaction?.enabled) {
@@ -3019,6 +3019,12 @@ const memoryLanceDBProPlugin = {
       (isCliMode() ? api.logger.debug : api.logger.info)(
         "self-improvement: integrated hooks registered (agent:bootstrap, command:new, command:reset)"
       );
+    }
+
+    // F2 fix: handle init failure - rollback the registration claim
+    } catch (err) {
+      _registeredApis.delete(api);
+      throw err;
     }
 
     // ========================================================================
