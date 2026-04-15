@@ -10,7 +10,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { MemoryRetriever, RetrievalResult } from "./retriever.js";
 import type { MemoryStore } from "./store.js";
-import { isNoise } from "./noise-filter.js";
+import { isNoise, ENVELOPE_NOISE_PATTERNS } from "./noise-filter.js";
+import { stripEnvelopeMetadata } from "./smart-extractor.js";
 import { isSystemBypassId, resolveScopeFilter, parseAgentIdFromSessionKey, type MemoryScopeManager } from "./scopes.js";
 import type { Embedder } from "./embedder.js";
 import {
@@ -20,6 +21,7 @@ import {
   parseSmartMetadata,
   stringifySmartMetadata,
 } from "./smart-metadata.js";
+import { classifyTemporal, inferExpiry } from "./temporal-classifier.js";
 import { TEMPORAL_VERSIONED_CATEGORIES } from "./memory-categories.js";
 import { appendSelfImprovementEntry, ensureSelfImprovementLearningFiles } from "./self-improvement-files.js";
 import { getDisplayCategoryTag } from "./reflection-metadata.js";
@@ -173,9 +175,15 @@ async function retrieveWithRetry(
     scopeFilter?: string[];
     category?: string;
   },
+  countStore?: () => Promise<number>,
 ): Promise<RetrievalResult[]> {
   let results = await retriever.retrieve(params);
   if (results.length === 0) {
+    // Skip retry if store is empty — nothing to catch up via write-ahead lag.
+    if (countStore) {
+      const total = await countStore();
+      if (total === 0) return results;
+    }
     await sleep(75);
     results = await retriever.retrieve(params);
   }
@@ -208,7 +216,7 @@ async function resolveMemoryId(
     query: trimmed,
     limit: 5,
     scopeFilter,
-  });
+  }, () => context.store.count());
   if (results.length === 0) {
     return {
       ok: false,
@@ -573,7 +581,7 @@ export function registerMemoryRecallTool(
             scopeFilter,
             category,
             source: "manual",
-          }), runtimeContext.workspaceBoundary);
+          }, () => runtimeContext.store.count()), runtimeContext.workspaceBoundary);
 
           if (results.length === 0) {
             return {
@@ -628,7 +636,7 @@ export function registerMemoryRecallTool(
             content: [
               {
                 type: "text",
-                text: `Found ${results.length} memories:\n\n${text}`,
+                text: `<relevant-memories>\n<mode:${includeFullText ? "full" : "summary"}>\nFound ${results.length} memories:\n\n${text}\n</relevant-memories>`,
               },
             ],
             details: {
@@ -637,6 +645,7 @@ export function registerMemoryRecallTool(
               query,
               scopes: scopeFilter,
               retrievalMode: runtimeContext.retriever.getConfig().mode,
+              recallMode: includeFullText ? "full" : "summary",
             },
           };
         } catch (error) {
@@ -695,6 +704,20 @@ export function registerMemoryStoreTool(
         };
 
         try {
+          // Guard: strip envelope metadata first, reject only if nothing remains (P2 fix)
+          const stripped = stripEnvelopeMetadata(text);
+          if (!stripped.trim()) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: "Skipped: text is purely envelope metadata with no extractable memory content.",
+                },
+              ],
+              details: { action: "envelope_metadata_rejected", text: text.slice(0, 60) },
+            };
+          }
+
           const agentId = runtimeContext.agentId;
           // Determine target scope
           let targetScope = scope;
@@ -766,14 +789,24 @@ export function registerMemoryStoreTool(
           }
 
           const safeImportance = clamp01(importance, 0.7);
-          const vector = await runtimeContext.embedder.embedPassage(text);
+          const vector = await runtimeContext.embedder.embedPassage(stripped);
 
-          // Check for duplicates using raw vector similarity (bypasses importance/recency weighting)
+          // Temporal awareness: classify and infer expiry
+          const temporalType = classifyTemporal(stripped);
+          const validUntil = inferExpiry(stripped);
+          // Check for duplicates / supersede candidates using raw vector similarity
+          // (bypasses importance/recency weighting).
           // Fail-open by design: dedup must never block a legitimate memory write.
           // excludeInactive: superseded historical records must not block new writes.
+          // Align with TEMPORAL_VERSIONED_CATEGORIES: only preference and entity
+          // are semantically version-controlled. "fact"/"other" can reverse-map
+          // to unrelated semantic categories, risking cross-supersede.
+          const SUPERSEDE_ELIGIBLE: ReadonlySet<string> = new Set([
+            "preference", "entity",
+          ]);
           let existing: Awaited<ReturnType<MemoryStore["vectorSearch"]>> = [];
           try {
-            existing = await runtimeContext.store.vectorSearch(vector, 1, 0.1, [
+            existing = await runtimeContext.store.vectorSearch(vector, 3, 0.1, [
               targetScope,
             ], { excludeInactive: true });
           } catch (err) {
@@ -796,6 +829,108 @@ export function registerMemoryStoreTool(
                 existingText: existing[0].entry.text,
                 existingScope: existing[0].entry.scope,
                 similarity: existing[0].score,
+              },
+            };
+          }
+
+          // Auto-supersede: if a similar memory exists (0.95-0.98 similarity),
+          // same storage-layer category, and category is eligible, mark the old
+          // one as superseded and store the new one with a supersedes link.
+          const supersedeCandidate = existing.find(
+            (r) =>
+              r.score > 0.95 &&
+              r.score <= 0.98 &&
+              r.entry.category === category &&
+              SUPERSEDE_ELIGIBLE.has(r.entry.category),
+          );
+
+          if (supersedeCandidate) {
+            const oldEntry = supersedeCandidate.entry;
+            const oldMeta = parseSmartMetadata(oldEntry.metadata, oldEntry);
+            const now = Date.now();
+            const factKey =
+              oldMeta.fact_key ?? deriveFactKey(oldMeta.memory_category, text);
+
+            // Store new memory with supersedes link, preserving canonical fields
+            // from the old entry (aligns with memory_update supersede path).
+            const newMeta = buildSmartMetadata(
+              { text, category: category as any, importance: safeImportance },
+              {
+                l0_abstract: text,
+                l1_overview: oldMeta.l1_overview || `- ${text}`,
+                l2_content: text,
+                memory_category: oldMeta.memory_category,
+                tier: oldMeta.tier,
+                source: "manual",
+                state: "confirmed",
+                memory_layer: deriveManualMemoryLayer(category as string),
+                last_confirmed_use_at: now,
+                bad_recall_count: 0,
+                suppressed_until_turn: 0,
+                valid_from: now,
+                fact_key: factKey,
+                supersedes: oldEntry.id,
+                relations: appendRelation([], {
+                  type: "supersedes",
+                  targetId: oldEntry.id,
+                }),
+              },
+            );
+
+            const newEntry = await runtimeContext.store.store({
+              text,
+              vector,
+              importance: safeImportance,
+              category: category as any,
+              scope: targetScope,
+              metadata: stringifySmartMetadata(newMeta),
+            });
+
+            // Invalidate old record
+            try {
+              await runtimeContext.store.patchMetadata(
+                oldEntry.id,
+                {
+                  fact_key: factKey,
+                  invalidated_at: now,
+                  superseded_by: newEntry.id,
+                  relations: appendRelation(oldMeta.relations, {
+                    type: "superseded_by",
+                    targetId: newEntry.id,
+                  }),
+                },
+                [targetScope],
+              );
+            } catch (patchErr) {
+              // New record is already the source of truth; log but don't fail
+              console.warn(
+                `memory-pro: failed to patch superseded record ${oldEntry.id.slice(0, 8)}: ${patchErr}`,
+              );
+            }
+
+            // Dual-write to Markdown mirror if enabled
+            if (context.mdMirror) {
+              await context.mdMirror(
+                { text, category: category as string, scope: targetScope, timestamp: newEntry.timestamp },
+                { source: "memory_store", agentId },
+              );
+            }
+
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Superseded memory ${oldEntry.id.slice(0, 8)}... → new version ${newEntry.id.slice(0, 8)}...: "${text.slice(0, 80)}${text.length > 80 ? "..." : ""}"`,
+                },
+              ],
+              details: {
+                action: "superseded",
+                id: newEntry.id,
+                supersededId: oldEntry.id,
+                scope: newEntry.scope,
+                category: newEntry.category,
+                importance: newEntry.importance,
+                similarity: supersedeCandidate.score,
               },
             };
           }
@@ -823,6 +958,8 @@ export function registerMemoryStoreTool(
                   last_confirmed_use_at: Date.now(),
                   bad_recall_count: 0,
                   suppressed_until_turn: 0,
+                  memory_temporal_type: temporalType,
+                  valid_until: validUntil,
                 },
               ),
             ),
@@ -948,7 +1085,7 @@ export function registerMemoryForgetTool(
               query,
               limit: 5,
               scopeFilter,
-            });
+            }, () => context.store.count());
 
             if (results.length === 0) {
               return {
@@ -1090,7 +1227,7 @@ export function registerMemoryUpdateTool(
               query: memoryId,
               limit: 3,
               scopeFilter,
-            });
+            }, () => context.store.count());
             if (results.length === 0) {
               return {
                 content: [
@@ -2011,7 +2148,7 @@ export function registerMemoryExplainRankTool(
             limit: safeLimit,
             scopeFilter,
             source: "manual",
-          });
+          }, () => runtimeContext.store.count());
           if (results.length === 0) {
             return {
               content: [{ type: "text", text: "No relevant memories found." }],

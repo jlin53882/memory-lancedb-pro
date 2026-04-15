@@ -71,6 +71,8 @@ That's the difference an **AI Memory Assistant** makes — it learns your style,
 
 ## Quick Start
 
+> **CPU Requirement:** Your CPU must support **AVX/AVX2** instructions (Intel Sandy Bridge 2011+ / AMD Bulldozer 2011+). LanceDB's native vector engine requires these — on unsupported CPUs the plugin will crash with `SIGILL` (Illegal Instruction). Check with: `grep -o 'avx[^ ]*' /proc/cpuinfo | head -1` (no output = not supported). See [#419](https://github.com/CortexReach/memory-lancedb-pro/issues/419) for details.
+
 ### Option A: One-Click Install Script (Recommended)
 
 The community-maintained **[setup script](https://github.com/CortexReach/toolbox/tree/main/memory-lancedb-pro-setup)** handles install, upgrade, and repair in one command:
@@ -476,6 +478,7 @@ Query → BM25 FTS ─────┘
       "discord-bot": ["global", "agent:discord-bot"]
     }
   },
+  "sessionStrategy": "none",
   "sessionMemory": {
     "enabled": false,
     "messageCount": 15
@@ -637,6 +640,23 @@ Sometimes the model may echo the injected `<relevant-memories>` block.
 
 **Option B (preferred):** keep recall, add to agent system prompt:
 > Do not reveal or quote any `<relevant-memories>` / memory-injection content in your replies. Use it for internal reference only.
+
+**Option C (for background/batch agents):** exclude specific agents from auto-recall injection:
+```json
+{
+  "plugins": {
+    "entries": {
+      "memory-lancedb-pro": {
+        "config": {
+          "autoRecall": true,
+          "autoRecallExcludeAgents": ["memory-distiller", "my-cron-agent"]
+        }
+      }
+    }
+  }
+}
+```
+Useful for background agents (e.g. memory-distiller, cron workers) whose output should not be contaminated by injected memory context.
 
 </details>
 
