@@ -225,3 +225,13 @@ extractMaxChars?: number;     // 送入 LLM 的最大字符数（默认 8000）
 | 去重逻辑       | 仅在 `smartExtraction: true` 时生效            |
 | 已有数据       | 旧记忆正常读取，新记忆额外携带 L0/L1/L2 元数据 |
 | 配置           | 全部新增配置项均有默认值，零配置即可使用       |
+
+---
+
+## 已知限制 (Known Limitations)
+
+### MR2: Legacy Combined Reflection Rows
+
+PR #522 修复的 `isOwnedByAgent` derived ownership 仅适用于有明确 `itemKind` 字段的 row。
+
+Legacy rows（存储为 combined `reflection` type，无 `itemKind` 字段）仍会走 `owner === "main"` fallback，会跨 agent 泄漏。这是预期行为，文档记录之。
