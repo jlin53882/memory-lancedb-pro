@@ -52,6 +52,10 @@ export const CI_TEST_MANIFEST = [
   { group: "core-regression", runner: "node", file: "test/embedder-cache.test.mjs" },
   // Issue #629 batch embedding fix
   { group: "llm-clients-and-auth", runner: "node", file: "test/embedder-ollama-batch-routing.test.mjs" },
+  // Issue #670 ENOENT after stale lock unlink
+  { group: "core-regression", runner: "node", file: "test/lock-recovery.test.mjs", args: ["--test"] },
+  // Issue #626 missing test - store write queue
+  { group: "core-regression", runner: "node", file: "test/store-write-queue.test.mjs" },
   // Issue #665 bulkStore tests
   { group: "storage-and-schema", runner: "node", file: "test/bulk-store.test.mjs", args: ["--test"] },
   { group: "storage-and-schema", runner: "node", file: "test/bulk-store-edge-cases.test.mjs", args: ["--test"] },
