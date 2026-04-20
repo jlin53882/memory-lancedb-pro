@@ -231,6 +231,7 @@ export class MemoryStore {
     }
 
     const release = await lockfile.lock(lockPath, {
+      realpath: false,
       retries: { retries: 10, factor: 2, minTimeout: 200, maxTimeout: 5000 },
       stale: 10000,
     });
