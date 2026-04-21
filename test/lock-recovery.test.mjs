@@ -11,7 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { spawn } from "node:child_process";
 import jitiFactory from "jiti";
 
@@ -248,6 +248,95 @@ console.log("RECOVERED_WRITE_OK");
       const all = await verifyStore.list(undefined, undefined, 20, 0);
       assert.strictEqual(all.length, 1);
       assert.strictEqual(all[0].text, "recovered");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("cleans up stale FILE artifacts and succeeds (proper-lockfile v3 legacy)", async () => {
+    // Issue #670 C2: old proper-lockfile v3 creates FILE artifacts
+    // When a stale FILE exists at lockPath, store should clean it up and succeed
+    const { store, dir } = makeStore();
+    const lockPath = join(dir, ".memory-write.lock");
+
+    try {
+      // Create a stale FILE artifact (simulating old proper-lockfile v3 behavior)
+      mkdirSync(dirname(lockPath), { recursive: true });
+      writeFileSync(lockPath, "old-lock-file", { flag: "wx" });
+
+      // Make it appear stale (6+ minutes old, threshold is 5 minutes)
+      const oldTime = new Date(Date.now() - 6 * 60 * 1000);
+      utimesSync(lockPath, oldTime, oldTime);
+
+      const stat = statSync(lockPath);
+      assert.ok(stat.isFile(), "Should be a file artifact");
+      assert.ok(Date.now() - stat.mtimeMs > 5 * 60 * 1000, "Should be stale");
+
+      // Store should clean up the stale FILE and succeed
+      const entry = await store.store(makeEntry(1));
+      assert.ok(entry.id);
+
+      // Verify entry was written
+      const all = await store.list(undefined, undefined, 20, 0);
+      assert.strictEqual(all.length, 1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("cleans up stale DIRECTORY artifacts (proper-lockfile v4 behavior)", async () => {
+    // proper-lockfile v4 creates DIRECTORIES as lock artifacts
+    // Verify that stale directory artifacts ARE cleaned up
+    const { store, dir } = makeStore();
+    const lockPath = join(dir, ".memory-write.lock");
+
+    try {
+      // Create a stale DIRECTORY artifact (simulating proper-lockfile v4 behavior)
+      mkdirSync(lockPath, { recursive: true });
+
+      const oldTime = new Date(Date.now() - 120_000);
+      utimesSync(lockPath, oldTime, oldTime);
+
+      const stat = statSync(lockPath);
+      assert.ok(stat.isDirectory(), "Should be a directory");
+      assert.ok(stat.mtimeMs < Date.now() - 60_000, "Should be stale");
+
+      // Store should clean up the stale directory and succeed
+      const entry = await store.store(makeEntry(1));
+      assert.ok(entry.id);
+
+      // Verify entry was written
+      const all = await store.list(undefined, undefined, 20, 0);
+      assert.strictEqual(all.length, 1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("recovers from TOCTOU race: non-stale artifact blocks first lock attempt", async () => {
+    // C1: TOCTOU race - artifact created between proactive cleanup and lock()
+    // Simulates: cleanup runs (artifact is non-stale, not removed) →
+    // another process creates artifact → lock() fails with ELOCKED → retry succeeds
+    const { store, dir } = makeStore();
+    const lockPath = join(dir, ".memory-write.lock");
+
+    try {
+      // Create a NON-stale FILE artifact (proactive cleanup won't remove it)
+      mkdirSync(dirname(lockPath), { recursive: true });
+      writeFileSync(lockPath, "recent-lock-file", { flag: "wx" });
+
+      const stat = statSync(lockPath);
+      assert.ok(stat.isFile(), "Should be a file artifact");
+      // Non-stale: age < 5 minutes, so proactive cleanup skips it
+      assert.ok(Date.now() - stat.mtimeMs < 5 * 60 * 1000, "Should NOT be stale");
+
+      // Store should fail first lock attempt, cleanup, then retry and succeed
+      const entry = await store.store(makeEntry(1));
+      assert.ok(entry.id, "Store should succeed after retry-with-cleanup");
+
+      // Verify entry was written
+      const all = await store.list(undefined, undefined, 20, 0);
+      assert.strictEqual(all.length, 1);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
