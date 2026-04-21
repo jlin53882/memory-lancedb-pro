@@ -55,6 +55,8 @@ export const CI_TEST_MANIFEST = [
   { group: "storage-and-schema", runner: "node", file: "test/bulk-store-edge-cases.test.mjs", args: ["--test"] },
   { group: "storage-and-schema", runner: "node", file: "test/smart-extractor-bulk-store.test.mjs", args: ["--test"] },
   { group: "storage-and-schema", runner: "node", file: "test/smart-extractor-bulk-store-edge-cases.test.mjs", args: ["--test"] },
+  // Issue #670/#675/#676 lock stale threshold regression tests
+  { group: "core-regression", runner: "node", file: "test/lock-stale-threshold.test.mjs", args: ["--test"] },
 ];
 
 export function getEntriesForGroup(group) {
