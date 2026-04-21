@@ -1,0 +1,12 @@
+{
+  "VAULT_PATH": "C:\\Users\\admin\\hermes-knowledge",
+  "INDEX_DIR": "C:\\Users\\admin\\.openclaw\\workspace\\tmp\\obsidian_index",
+  "RERANKER_URL": "http://localhost:19999/v1/rerank",
+  "OLLAMA_URL": "http://localhost:11434/api/embeddings",
+  "OLLAMA_EMBED_URL": "http://localhost:11434/api/embeddings",
+  "EMBEDDING_MODEL": "jina-v5-retrieval-test",
+  "RERANKER_MODEL": "BAAI/bge-reranker-base",
+  "TOP_K": 5,
+  "VECTOR_WEIGHT": 0.3,
+  "RERANK_WEIGHT": 0.7
+}

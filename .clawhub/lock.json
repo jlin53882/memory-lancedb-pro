@@ -3,87 +3,87 @@
   "skills": {
     "code": {
       "version": "1.0.4",
-      "installedAt": 1774445627223
+      "installedAt": 1776783207381
     },
     "taste-skill": {
       "version": "1.6.1",
-      "installedAt": 1776357506972
+      "installedAt": 1776783209547
     },
     "superpowers": {
       "version": "1.0.0",
-      "installedAt": 1776357525254
+      "installedAt": 1776783211963
     },
     "minimax-skill": {
       "version": "1.0.0",
-      "installedAt": 1776358323320
+      "installedAt": 1776783213619
     },
     "minimax-video-generate": {
       "version": "1.0.0",
-      "installedAt": 1776358334324
+      "installedAt": 1776783214975
     },
     "minimax-music": {
       "version": "1.0.0",
-      "installedAt": 1776358336731
+      "installedAt": 1776783216340
     },
     "minimax-tts-cn": {
       "version": "1.0.0",
-      "installedAt": 1776358339328
+      "installedAt": 1776783218376
     },
     "minimax-understand-image": {
       "version": "1.0.3",
-      "installedAt": 1776358342008
+      "installedAt": 1776783219795
     },
     "minimax-image-generation": {
       "version": "1.0.0",
-      "installedAt": 1776358344586
+      "installedAt": 1776783221513
     },
     "minimax-coding-plan": {
       "version": "0.1.1",
-      "installedAt": 1776358347304
+      "installedAt": 1776783223008
     },
     "minimax-xlsx": {
       "version": "1.0.0",
-      "installedAt": 1776782670896
+      "installedAt": 1776783226213
     },
     "minimax-docx": {
       "version": "1.0.0",
-      "installedAt": 1776782680821
+      "installedAt": 1776783230968
     },
     "pptx-generator": {
       "version": "1.0.2",
-      "installedAt": 1776782682622
+      "installedAt": 1776783232611
     },
     "minimax-pdf": {
       "version": "1.0.0",
-      "installedAt": 1776782684892
+      "installedAt": 1776783234256
     },
     "yh-minimax-multimodal-toolkit": {
       "version": "1.0.0",
-      "installedAt": 1776782698434
+      "installedAt": 1776783237307
     },
     "minimax-vision-analysis": {
       "version": "1.0.0",
-      "installedAt": 1776782715291
+      "installedAt": 1776783239183
     },
     "minimax-music-generate": {
       "version": "1.0.0",
-      "installedAt": 1776782717628
+      "installedAt": 1776783241280
     },
     "minimax-shader-dev": {
       "version": "1.0.0",
-      "installedAt": 1776782736350
+      "installedAt": 1776783243216
     },
     "minimax-gif-sticker": {
       "version": "1.0.0",
-      "installedAt": 1776782738628
+      "installedAt": 1776783245114
     },
     "minimax-flutter-dev": {
       "version": "1.0.0",
-      "installedAt": 1776782773566
+      "installedAt": 1776783246883
     },
     "minimax-react-native-dev": {
       "version": "1.0.0",
-      "installedAt": 1776782775761
+      "installedAt": 1776783248627
     }
   }
 }
