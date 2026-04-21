@@ -4,6 +4,86 @@
     "code": {
       "version": "1.0.4",
       "installedAt": 1774445627223
+    },
+    "taste-skill": {
+      "version": "1.6.1",
+      "installedAt": 1776357506972
+    },
+    "superpowers": {
+      "version": "1.0.0",
+      "installedAt": 1776357525254
+    },
+    "minimax-skill": {
+      "version": "1.0.0",
+      "installedAt": 1776358323320
+    },
+    "minimax-video-generate": {
+      "version": "1.0.0",
+      "installedAt": 1776358334324
+    },
+    "minimax-music": {
+      "version": "1.0.0",
+      "installedAt": 1776358336731
+    },
+    "minimax-tts-cn": {
+      "version": "1.0.0",
+      "installedAt": 1776358339328
+    },
+    "minimax-understand-image": {
+      "version": "1.0.3",
+      "installedAt": 1776358342008
+    },
+    "minimax-image-generation": {
+      "version": "1.0.0",
+      "installedAt": 1776358344586
+    },
+    "minimax-coding-plan": {
+      "version": "0.1.1",
+      "installedAt": 1776358347304
+    },
+    "minimax-xlsx": {
+      "version": "1.0.0",
+      "installedAt": 1776782670896
+    },
+    "minimax-docx": {
+      "version": "1.0.0",
+      "installedAt": 1776782680821
+    },
+    "pptx-generator": {
+      "version": "1.0.2",
+      "installedAt": 1776782682622
+    },
+    "minimax-pdf": {
+      "version": "1.0.0",
+      "installedAt": 1776782684892
+    },
+    "yh-minimax-multimodal-toolkit": {
+      "version": "1.0.0",
+      "installedAt": 1776782698434
+    },
+    "minimax-vision-analysis": {
+      "version": "1.0.0",
+      "installedAt": 1776782715291
+    },
+    "minimax-music-generate": {
+      "version": "1.0.0",
+      "installedAt": 1776782717628
+    },
+    "minimax-shader-dev": {
+      "version": "1.0.0",
+      "installedAt": 1776782736350
+    },
+    "minimax-gif-sticker": {
+      "version": "1.0.0",
+      "installedAt": 1776782738628
+    },
+    "minimax-flutter-dev": {
+      "version": "1.0.0",
+      "installedAt": 1776782773566
+    },
+    "minimax-react-native-dev": {
+      "version": "1.0.0",
+      "installedAt": 1776782775761
     }
   }
 }
