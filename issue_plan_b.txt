@@ -1,0 +1,121 @@
+## 🔗 關聯 Issue
+
+跟隨 Issue #632 的後續追蹤
+
+---
+
+## 📋 Plan B 提案：Compare-and-Swap (CAS)
+
+### 問題背景
+
+Issue #632 的 Plan A（兩階段處理）已經緩解了主要的 lock contention 問題：
+- **Plan A**：N locks (每個 entry) → 1 lock per batch
+- 但仍然需要 lock，在某些邊界條件下可能造成競爭
+
+### 解決方案
+
+Plan B 使用 Compare-and-Swap (CAS) 實現無鎖（lock-free）並發更新：
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Plan B: CAS                          │
+├─────────────────────────────────────────────────────────┤
+│  1. 每次更新讀取當前 version                            │
+│  2. 更新時 compare version，匹配才 swap                 │
+│  3. 若版本衝突，自動重試直到成功                         │
+│  4. 完全不需要 lock                                    │
+└─────────────────────────────────────────────────────────┘
+```
+
+### 實作方式
+
+需要新增 `version` 欄位到每個 memory entry：
+
+```typescript
+interface MemoryEntry {
+  // ... existing fields ...
+  version: number;  // 新增：用於 CAS
+}
+```
+
+更新流程：
+```typescript
+async function atomicUpdate(id, expectedVersion, newData) {
+  const record = await store.get(id);
+  
+  if (record.version !== expectedVersion) {
+    // 版本衝突，重試
+    return { success: false, conflictVersion: record.version };
+  }
+  
+  // 版本匹配，更新並遞增版本號
+  await store.update(id, {
+    ...newData,
+    version: record.version + 1,
+  });
+  
+  return { success: true };
+}
+```
+
+### 優點
+
+| 優點 | 說明 |
+|------|------|
+| ✅ 完全無鎖 | 可並發執行，無 lock contention |
+| ✅ 適合分散式 | 多 Gateway 實例可同時運行 |
+| ✅ 自動序列化 | 版本衝突時自動重試，最終一致 |
+| ✅ 無 long operation | 每個 operation 都是 O(1) lock 時間 |
+
+### 缺點
+
+| 缺點 | 說明 |
+|------|------|
+| ❌ 需要 schema migration | 所有現有 entry 需要加 `version` 欄位 |
+| ❌ 需要 store API 改動 | 需要修改 `store.update()` 支援 version |
+| ❌ 高並發時可能重試多次 | conflict → retry → conflict → retry |
+| ❌ 複雜度增加 | 需要處理重試邏輯 |
+
+### 適用場景
+
+- **多 Gateway 實例同時運行**：每個實例無需協調即可並發更新
+- **需要嚴格的最終一致性**：CAS 提供更強的一致性保證
+- **大規模升級**：1000+ entries 的批量升級
+
+---
+
+## 📊 Plan A vs Plan B 比較
+
+| 特性 | Plan A (已實作) | Plan B (本 issue) |
+|------|-----------------|-------------------|
+| Lock 次數 | 1 per batch | **0** (無鎖) |
+| Schema 改動 | 無 | 需要加 `version` |
+| API 改動 | 無 | 修改 `store.update()` |
+| 實作複雜度 | 中等 | 較高 |
+| 適用場景 | 單一 Gateway | **多 Gateway 實例** |
+| 遷移成本 | 無 | 需要 migration script |
+
+---
+
+## 🎯 預期效益
+
+實作 Plan B 後：
+1. **完全消除 lock contention**：Plugin 和 Upgrade CLI 可真正並發運行
+2. **支援多實例**：多個 Gateway 可同時執行升級
+3. **更好的擴展性**：從 O(batch_size) lock time → O(1) lock time
+
+---
+
+## 🔄 實作步驟建議
+
+1. 新增 `version` 欄位到 `MemoryEntry` schema
+2. 實作 migration script：為所有現有 entry 加入 `version: 1`
+3. 修改 `store.update()` 支援 version check
+4. 新增 `store.atomicUpdate()` API
+5. 更新 `memory-upgrader.ts` 使用 atomicUpdate
+
+---
+
+## ⏰ 優先級
+
+**低** — Plan A 已經解決主要問題。Plan B 適合做為未來優化或當需要支援多 Gateway 實例時再實作。

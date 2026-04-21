@@ -1,0 +1,64 @@
+## Summary
+
+**Issue**: Lock contention between upgrade CLI and plugin causes writes to fail (#632)
+
+**Root Cause**: The old implementation called `store.update()` for each entry individually, resulting in N lock acquisitions for N entries. The plugin had to wait seconds for each lock during LLM enrichment.
+
+**Fix**: Two-phase processing
+- Phase 1: LLM enrichment (no lock)
+- Phase 2: Single lock per batch for all DB writes
+
+---
+
+## Changes
+
+### `src/memory-upgrader.ts`
+
+**Refactored** `upgradeEntry()` into two methods:
+
+1. **`prepareEntry()`** - Phase 1: LLM enrichment WITHOUT lock
+   - Contains the SAME logic as old `upgradeEntry()`
+   - Runs WITHOUT acquiring a lock
+   - Returns `EnrichedEntry` for Phase 2
+
+2. **`writeEnrichedBatch()`** - Phase 2: Single lock for all writes
+   - Acquires lock ONCE for entire batch
+   - Writes all enriched entries under one lock
+
+**Key improvement**:
+| Scenario | Before | After | Improvement |
+|----------|--------|-------|-------------|
+| 10 entries | 10 locks | **1 lock** | -90% |
+| 100 entries | 100 locks | **10 locks** | -90% |
+
+---
+
+## Test Update
+
+### `test/upgrader-phase2-lock.test.mjs`
+
+**Updated** Test 1 to verify NEW (fixed) behavior:
+- **Before**: Test was designed to verify BUGGY behavior (1 lock per entry)
+- **After**: Test now verifies FIXED behavior (1 lock per batch)
+
+```
+Before: 3 entries = 3 locks (BUG)
+After:  3 entries = 1 lock  (FIX)
+```
+
+---
+
+## Why This Works
+
+The plugin only needs to write to memory during auto-recall (very fast DB operations). The upgrade CLI was holding locks during slow LLM enrichment, blocking the plugin.
+
+By separating LLM enrichment from DB writes:
+- **Phase 1 (LLM)**: Runs WITHOUT lock → plugin can acquire lock between entries
+- **Phase 2 (DB)**: Lock held only for fast DB writes → plugin waits only milliseconds
+
+---
+
+## Related Issues
+
+- Issue #632: Original lock contention bug
+- Issue #638: Plan B tracking (CAS for lock-free, future work)

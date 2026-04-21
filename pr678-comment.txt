@@ -1,0 +1,36 @@
+## 補充：Lock stale threshold 根因測試
+
+除了 #675/#676 的迴歸測試外，此 PR 額外包含 `test/lock-stale-threshold.test.mjs`（commit `7c2eaed`），用於證明 N×`store.store()` 是 `Unable to update lock within the stale threshold` 錯誤的根因。
+
+### 關鍵發現
+
+測試 TC-5 結果：
+```
+3×store.store() = 615ms  vs  1×bulkStore(3) = 7ms
+```
+
+原因：每個 `store.store()` 單獨拿一次 lock（N 次），而 `bulkStore()` 一次拿 lock 寫入全部 N 筆，lock 持有時間差異 **88 倍**。
+
+當 lock holder 序列化 N 個 operation 總時間超過 `stale: 10000`（10 秒）時，就會觸發 `Unable to update lock within the stale threshold`。
+
+### PR #678 的修復邏輯
+
+| 問題點 | 修復 |
+|--------|------|
+| `index.ts` regex fallback N×`store.store()` | → `bulkStore()` 一次拿 lock |
+| `src/smart-extractor.ts` handleSupersede bypass | → 改用 `createEntries.push()` 批次 |
+
+### 測試結果
+
+```
+TC-1: Lock configuration          ✅  stale:10000 存在
+TC-2: bulkStore correctness       ✅  3 tests
+TC-3: Concurrent serialization    ✅  2 tests
+TC-4: Lock lifecycle              ✅  2 tests
+TC-5: N×store vs bulkStore        ✅  615ms vs 7ms（問題證明）
+Total: 10 pass, 0 fail
+```
+
+---
+
+另外發現：此 PR 若 merge 後，`origin/fix/issue-670-clean` 分支可安全刪除（已無對應 official PR）。

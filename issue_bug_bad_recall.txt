@@ -1,0 +1,183 @@
+# [BUG] `bad_recall_count` accumulates permanently — `last_confirmed_use_at` never written causes permanent memory suppression
+
+## Plugin Version
+1.1.0-beta.10 (latest commit, post-PR #354 merged)
+
+## Bug Description
+
+After PR #354 fixed the `state: "pending"` deadlock (auto-capture now writes `state: "confirmed"`), a second governance filter issue remains: **`bad_recall_count` accumulates without bound and `last_confirmed_use_at` is never written**, causing memories to be **permanently suppressed** after 3 consecutive injections.
+
+### Relationship with PR #354
+
+**PR #354 scope**: Fixed `state: "pending"` → `state: "confirmed"` in all 5 auto-capture write paths (index.ts regex fallback + smart-extractor.ts 4 paths). This resolved Issue #350's deadlock.
+
+**This bug is separate and was NOT covered by PR #354**:
+- PR #354's test plan only verified `state: "confirmed"` writes and governance filter behavior for `state`
+- PR #354 did not test or mention `bad_recall_count`, `suppressed_until_turn`, or `last_confirmed_use_at`
+- The `bad_recall_count` permanent suppression bug existed before PR #354 and remained after it was merged
+
+### Root Cause
+
+The feedback loop that controls `suppressed_until_turn` has a critical gap:
+
+```typescript
+// index.ts:2559-2565
+const staleInjected =
+  typeof meta.last_confirmed_use_at === "number" &&  // ← ALWAYS false
+  meta.last_injected_at > 0 &&
+  (
+    typeof meta.last_confirmed_use_at !== "number" ||  // ← ALWAYS true
+    meta.last_confirmed_use_at < meta.last_injected_at
+  );
+```
+
+**`last_confirmed_use_at` is never written anywhere in the codebase** (verified by searching the entire repository). As a result:
+
+- `typeof meta.last_confirmed_use_at === "number"` → always `false`
+- `staleInjected` → evaluates to `false` (due to first condition being false, short-circuit)
+- The code treats `staleInjected: false` as "good recall" — BUT the counter never resets either
+
+The critical issue: on the **first-ever injection** of a memory, `staleInjected` is `true` (because `last_confirmed_use_at` is `undefined`, making the entire expression evaluate to `true` through the last disjunct). This causes `bad_recall_count` to immediately jump to the suppression threshold.
+
+### Suppression Logic
+
+```typescript
+// index.ts:2566-2569
+const nextBadRecallCount = staleInjected
+  ? meta.bad_recall_count + 1   // ← Increments on every injection (first injection: 0→3)
+  : meta.bad_recall_count;      // ← Never resets because staleInjected is always true
+
+const shouldSuppress = nextBadRecallCount >= 3 && minRepeated > 0;
+// Once bad_recall_count reaches 3, shouldSuppress = true forever
+```
+
+```typescript
+// index.ts:2432-2435
+if (meta.suppressed_until_turn > 0 && currentTurn <= meta.suppressed_until_turn) {
+  suppressedFilteredCount++;
+  return false;  // Permanently filtered once bad_recall_count >= 3
+}
+```
+
+## Expected vs Actual Behavior
+
+| Turn | Expected | Actual |
+|------|----------|--------|
+| Turn 1 | Memory injected, bad_recall_count = 0 | ✅ Correct (injected) |
+| Turn 2 | Memory injected, bad_recall_count = 0 | ❌ Suppressed (bad_recall_count jumped to 3 on first injection) |
+| Turn 3+ | Memory injected | ❌ Still suppressed until turn > suppressed_until_turn |
+
+**The first-ever injection of a memory is always treated as "stale" because `last_confirmed_use_at` is undefined**, causing `bad_recall_count` to immediately reach the suppression threshold.
+
+## Symptoms Observed
+
+Gateway log:
+```
+memory-lancedb-pro: auto-recall skipped after governance filters (hits=6, dedupFiltered=0, stateFiltered=0, suppressedFiltered=6)
+```
+
+- `hits=6`: 6 memories found by semantic search
+- `suppressedFiltered=6`: ALL 6 are permanently suppressed
+- Pattern: After Gateway restart, the **first recall in each session** finds memories, but they are all suppressed
+
+### Turn Counter Behavior
+
+The `turnCounter` is a module-level Map that **resets on Gateway restart**:
+
+```typescript
+// index.ts:2322
+const currentTurn = (turnCounter.get(sessionId) || 0) + 1;
+```
+
+This means after restart:
+- Turn 1: Memory injected → `bad_recall_count` becomes 3 → `suppressed_until_turn` set to `1 + minRepeated` (e.g., 9)
+- Turns 2-9: Suppressed
+- Turn 10+: Suppression expires (turn > suppressed_until_turn) → Memory appears **once** → cycle repeats
+
+**This explains the "appears once after restart" behavior reported by users.**
+
+## Steps to Reproduce
+
+1. Enable `autoCapture: true` and `autoRecall: true`
+2. Have a conversation that triggers auto-capture
+3. Restart the Gateway
+4. In the new session, observe: memory appears on the first recall
+5. All subsequent recalls in the same session: memory is suppressed
+6. After `minRepeated` (default 8) turns pass, memory appears again for exactly one recall, then is suppressed again
+
+## Root Cause Analysis
+
+The `bad_recall_count` / `suppressed_until_turn` mechanism was designed to work with `last_confirmed_use_at` to form a feedback loop:
+
+```
+good recall → last_confirmed_use_at updated → staleInjected=false → bad_recall_count resets
+bad recall → bad_recall_count increments
+bad_recall_count >= 3 → suppress
+```
+
+But since `last_confirmed_use_at` is never written, the "good recall" path never executes:
+- `staleInjected` is always `true` on first-ever injection (undefined field)
+- `bad_recall_count` immediately reaches 3 after first injection
+- `shouldSuppress = true` forever
+- The only escape: `currentTurn > suppressed_until_turn` expires after `minRepeated` turns
+
+## Proposed Fixes
+
+### Fix A (Minimal, recommended): Set `autoRecallMinRepeated: 0`
+
+As a config workaround, setting `autoRecallMinRepeated: 0` disables the suppression mechanism entirely:
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "memory-lancedb-pro": {
+        "config": {
+          "autoRecallMinRepeated": 0
+        }
+      }
+    }
+  }
+}
+```
+
+This is a valid workaround since the suppression mechanism is broken anyway.
+
+### Fix B (Code fix): Wire up `last_confirmed_use_at`
+
+The proper fix requires:
+
+1. **Write** `last_confirmed_use_at` after confirmed usage:
+   - In `agent_end` hook, compare recalled memories against actual agent response
+   - If memory content was used → write `last_confirmed_use_at = Date.now()`
+
+2. **Reset** `bad_recall_count` when `last_confirmed_use_at >= last_injected_at`:
+   - Change the condition so that confirmed use resets the counter
+
+3. **Alternative**: Remove `last_confirmed_use_at` entirely and use a simpler decrement strategy:
+   - On each successful injection without confirmed use: `bad_recall_count = min(bad_recall_count + 1, 3)`
+   - On each turn that passes without injection: `bad_recall_count = max(0, bad_recall_count - 1)`
+   - This naturally decays the counter without needing a confirmed-use signal
+
+## Impact
+
+- Any user with `autoRecallMinRepeated > 0` (default: 8) experiences broken auto-recall
+- Memories appear only once per session/restart cycle, then disappear for the next 8 turns
+- This affects both auto-captured and manually stored memories
+- The suppression mechanism, designed to prevent noisy repeated memories, instead causes the opposite: memories disappearing when they should be available
+
+## Workaround
+
+Until a fix is released, add to plugin config:
+
+```json
+"autoRecallMinRepeated": 0
+```
+
+This disables suppression and restores normal recall behavior, at the cost of losing the "suppress recent repeats" feature (which is non-functional anyway due to this bug).
+
+## Related
+
+- Issue #350 (fixed by PR #354): `state: "pending"` deadlock — same governance filter, different field
+- PR #354: Only fixed `state: "pending"` → `state: "confirmed"`. Did NOT address `bad_recall_count` / `last_confirmed_use_at`
+- This bug was NOT introduced by PR #354 — it predates it and remains unfixed

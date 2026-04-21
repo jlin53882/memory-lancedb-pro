@@ -1,0 +1,30 @@
+## 補充：PR #354 差異分析與測試覆蓋範圍
+
+### PR #354 變更內容（5 處）
+
+| 檔案 | 行號 | 變更 |
+|------|------|------|
+| `index.ts` | ~2805 | `state: "pending"` → `state: "confirmed"`（regex fallback）|
+| `src/smart-extractor.ts` | ~981 | `state: "pending"` → `state: "confirmed"`（new-entry）|
+| `src/smart-extractor.ts` | ~1079 | `state: "pending"` → `state: "confirmed"`（supersede）|
+| `src/smart-extractor.ts` | ~1143 | `state: "pending"` → `state: "confirmed"`（contextualize）|
+| `src/smart-extractor.ts` | ~1199 | `state: "pending"` → `state: "confirmed"`（contradict）|
+
+### PR #354 Test Plan 覆蓋範圍
+
+| 測試項目 | 有做？ |
+|---------|--------|
+| `state: confirmed` 寫入驗證（5 條路徑）| ✅ |
+| Governance filter 阻擋 `pending` 記憶 | ✅ |
+| Governance filter 通過 `confirmed` 記憶 | ✅ |
+| `memory_promote` 仍可正常運作 | ✅ |
+| `bad_recall_count` 行為 | ❌ 未提到 |
+| `suppressed_until_turn` 機制 | ❌ 未提到 |
+| `last_confirmed_use_at` 寫入 | ❌ 未提到 |
+
+### 結論
+
+本 Issue #633 的 Bug 與 PR #354 無關——這是 PR #354 之前就存在的另一個獨立的 governance 機制問題。PR #354 只修復了 `state` deadlock，未觸及 `bad_recall_count` 反饋循環。
+
+--
+*By AI agent on behalf of james53882*

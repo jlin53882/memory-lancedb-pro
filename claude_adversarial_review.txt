@@ -1,0 +1,66 @@
+# 對抗性 Code Review — PR #678 Fix
+
+你是頂尖資深工程師，專門做對抗性 code review。你的任務是**找出這個 PR fix 的所有問題**，讓它不能在生產環境上線。
+
+## 專案
+- 目錄：`C:\Users\admin\.openclaw\extensions\memory-lancedb-pro`
+- 這是一個 Node.js + TypeScript + LanceDB 的記憶系統
+
+## 你要 review 的範圍
+1. `src/smart-extractor.ts` — invalidateEntries 修復
+2. `test/smart-extractor-scope-filter.test.mjs` — scope-filter 測試修復
+3. 整體 PR 設計決策
+
+## 對抗性 Review Checkpoints（必須全部過一遍）
+
+### 1. 語意正確性
+- `invalidateEntries` 的 `superseded_by: matchId`（自我參照）在邏輯上是否正確？查 `src/tools.ts` 和 `src/smart-metadata.ts` 確認 `superseded_by` 的實際語意
+- 雙向關係是否完整？`new.supersedes -> old.id` 和 `old.superseded_by` 的連接是否正確？
+- `store.update()` 在 `bulkStore` 後執行，會不會因為 LanceDB 的併發而產生 race condition？
+
+### 2. TypeScript 類型安全
+- `invalidateEntries` 的類型 `Array<{ id: string; metadata: string }>` 是否與 `store.update()` 的參數匹配？
+- 檢查 `src/store.ts` 中 `update()` 的簽名
+
+### 3. 錯誤處理
+- `bulkStore` 成功但 `invalidateEntries` 中的某個 `store.update()` 失敗，會怎樣？
+- `invalidateEntries` 是空陣列時，迴圈會不會出錯？
+
+### 4. 向後相容性
+- 當 `createEntries` 是 `undefined`（非 batch mode），`invalidateEntries` 也是 `undefined`，這時的 standalone path 行為是否正確？
+
+### 5. 效能
+- `invalidateEntries` 的 `store.update()` 是串列執行，如果有很多 supersede，會不會變成效能瓶頸？
+- 有沒有可能用 batch 方式一次更新多筆記錄？
+
+### 6. 測試覆蓋度
+- 現有測試有沒有覆蓋到 batch mode 下 supersede 的 invalidation？
+- scope-filter 測試是否真正測到了 `scopeFilter` 的傳遞鏈？
+
+### 7. Edge Cases
+- 如果 `handleSupersede` 在 batch mode 下，`existing.metadata` 解析失敗，會發生什麼？
+- 如果同一個 `matchId` 在同一次 `extractAndPersist` 中被 supersede 兩次（不可能？），會發生什麼？
+
+### 8. 與現有程式碼的衝突
+- 確認 `invalidateEntries` 的修改是否與 `handleContextualize` 和 `handleContradict` 的邏輯衝突（它們是否也有 batch mode？）
+
+## 輸出格式
+```
+## 對抗性 Review 結果
+
+### 🔴 阻擋問題（必須修復才能上線）
+- [問題1] ...（附檔名:行號）
+- [問題2] ...
+
+### 🟡 建議修改
+- [建議1] ...
+- [建議2] ...
+
+### 🟢 這個設計是對的（說明為什麼）
+- [確認1] ...
+
+### 最終結論
+[是否建議合併？理由]
+```
+
+請用繁體中文回答，盡量詳細。

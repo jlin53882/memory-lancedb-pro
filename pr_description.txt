@@ -1,0 +1,66 @@
+## Summary
+
+Two bugs causing N lock acquisitions instead of 1, resolved by routing both paths through bulkStore().
+
+## Changes
+
+### Issue #675 — Regex fallback bulkStore (index.ts)
+
+**Problem**: `agent_end` hook regex fallback loop called `store.store()` individually for each capturable text, causing N lock acquisitions (one per call).
+
+**Fix**: Collect all entries into `capturedEntries[]`, then call `store.bulkStore()` once after the loop.
+- Lock acquisition: N → 1 (per session)
+- Dual-write mdMirror moved after successful bulkStore
+
+### Issue #676 — handleSupersede batch push (src/smart-extractor.ts)
+
+**Problem**: `handleSupersede()` when existing record IS found called `store.store()` directly, bypassing the `createEntries[]` batch introduced in PR #669.
+
+**Fix**: When `createEntries` is provided, push new entry to `createEntries[]` instead of calling `store.store()` directly. After `bulkStore(createEntries)` completes, iterate `invalidateEntries[]` and call `store.update()` per old entry to set `invalidated_at`. The `superseded_by` field is intentionally omitted in batch mode (new entry ID is unknown until bulkStore completes); `supersedes: matchId` on the new entry provides the authoritative dedup signal.
+
+- `superseded_by` omission is safe: the retriever only reads `supersedes`, never `superseded_by`
+- Each `store.update()` in the invalidation loop acquires its own lock (LanceDB limitation; no atomic bulk-update-with-where-clause)
+- Error handling: per-update try-catch + aggregate error log prevents one failure from blocking others
+
+### Issue #670 — Lock stale threshold root cause test
+
+Added `test/lock-stale-threshold.test.mjs` to prove N×`store.store()` is the root cause of `Unable to update lock within the stale threshold` errors. TC-5 demonstrates: 3×`store.store()` = 615ms vs 1×`bulkStore(3)` = 7ms (88× difference).
+
+## Test Files
+
+### New tests (via jiti — import real source, not local mocks)
+
+- `test/supersede-existing-found-bulk.test.mjs` — 5 tests
+  Imports real `SmartExtractor` via jiti. Validates:
+  - SUPERSEDE batch: 0×store.store, 1×bulkStore, 1×store.update
+  - CREATE batch: 0×store.store, 1×bulkStore, 0×store.update
+  - bulkStore receives all entries in single call
+  - invalidated_at set on old entry; supersedes set on new entry
+  - Non-temporal category falls through to CREATE (not SUPERSEDE)
+
+- `test/regex-fallback-bulk-store.test.mjs` — 6 tests
+  Imports real `MemoryStore` via jiti (actual file-lock behavior). Validates:
+  - OLD pattern: N texts = N store.store() calls (confirmed buggy)
+  - NEW pattern: N texts = 1 bulkStore() call (fixed)
+  - Single text still uses bulkStore
+  - Empty texts skips both
+  - Dedup skips duplicate, remaining batched in bulkStore
+  - Real MemoryStore timing: OLD=N locks, NEW=1 lock
+
+- `test/lock-stale-threshold.test.mjs` — 6 tests
+  Uses real MemoryStore. Validates:
+  - Lock config: stale:10000, 10 retries with exponential backoff
+  - bulkStore correctness (skips invalid entries)
+  - Concurrent store.store() correctness
+  - Sequential store works without contention
+  - 3×store.store() > 1×bulkStore(3) timing
+  - bulkStore(1000) completes in 36ms vs ELOCKED for 50×store.store()
+
+### Fixed existing tests
+
+- `test/smart-extractor-scope-filter.test.mjs` — MockStore `bulkStore()` method added, 4/4 PASS
+
+## Linked Issues
+
+- Closes #675
+- Closes #676
