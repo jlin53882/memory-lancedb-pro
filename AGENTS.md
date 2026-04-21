@@ -5,6 +5,12 @@
 
 ---
 
+## ⛔ 強制規則：auto-skill 搜尋
+
+收到任何任務時，**必須先搜尋 auto-skill知識庫**，確認是否有相關經驗或最佳實踐。再搜尋其他來源（obsidian-semantic、memory-lancedb-pro）。不得略過此步驟。
+
+---
+
 ## 版本與環境
 
 | 項目 | 版本 |
