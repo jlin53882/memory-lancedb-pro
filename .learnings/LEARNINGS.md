@@ -179,3 +179,51 @@ src/store.ts:
 速度差異：88 倍
 Lock 差異：3 次 vs 1 次
 ```
+
+
+---
+
+## 2026-04-21（下午）- PR #678 修復（第二輪）
+
+### 學習 1：Commit 只改 test/manifest 但 stat 顯示 src 被改 = 警訊
+
+**事件：** commit 306c1d8（message 只說「test: register new test files in CI manifest」），
+但 git show --stat 顯示 src/smart-extractor.ts 有 112 行刪除
+（invalidateEntries[] 修復被意外覆蓋）
+
+**原因：** rebase/merge 時，以 upstream 版本的 smart-extractor.ts 為準，
+覆蓋了原本自己辛苦寫的修復
+
+**預防：** 
+- 看到 stat 顯示 src/*.ts 被改，就要懷疑
+- rebase 前先確認 upstream 是否改了同一個檔案
+- rebase/merge 後立刻跑相關測試
+
+### 學習 2：涉及 lock 的並發測試，error 要內部 catch
+
+**事件：** lock-stale-threshold.test.mjs TC-6 用 Promise.all() 並發 50 個 store.store()，
+ELOCKED error 傳播成 Node.js test runner failure（exit code 1），
+而不是被當成 timing 結果
+
+**預防：** 
+- 測量 timing 時，error 要在內部 catch
+- 改用 sequential or...of 迴圈，確保所有 entries 都被執行
+- 如果要測並發，就不要假設所有 call 都成功，要先處理 error
+
+### 學習 3：Mock 要實作被測程式碼會呼叫的所有 method
+
+**事件：** smart-extractor-scope-filter.test.mjs 的 MockStore 缺少 ulkStore()，
+但 SmartExtractor.extractAndPersist 在 PR #669 後開始 call ulkStore()
+
+**預防：** 
+- 每次修改被測程式碼後，要確認 mock 是否還完整
+- 新加的 method call 都要補到 mock 裡
+
+### 學習 4：維護者 review concern 要正面回應，給出具體數據
+
+維護者 3 個 concerns：
+1. handleSupersede 沒有 invalidate → 加 invalidateEntries[]
+2. 測試是 mock 而非真實整合 → 重構用 jiti import
+3. Mock 缺 ulkStore() → 補上
+
+**每次回應都要有：** 程式碼 diff + 測試 PASS 截圖 + 設計決策說明

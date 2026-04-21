@@ -262,3 +262,66 @@ with open('file.mjs', 'a', encoding='utf-8') as f:
 **實際**：bulkStore 是單次 	able.add(fullEntries) batch write，41ms 完成 1000 筆。
 
 **預防 Rule**：對程式碼行為有假設時，先讀 source code 確認再下結論。
+
+
+## [ERR-20260421-001]
+
+**Logged**: 2026-04-21T13:29:40.308Z
+**Priority**: critical
+**Status**: pending
+**Area**: config
+
+### Summary
+Commit 306c1d8 accidentally overwrote invalidateEntries fix during rebase
+
+### Details
+Commit message said "test: register new test files in CI manifest" but --stat showed src/smart-extractor.ts with 112 lines deleted. The invalidateEntries[] fix from b87f858 was accidentally overwritten when rebase used upstream's version of the file.
+
+### Suggested Action
+Before rebasing, check if upstream modified the same file(s) using git log or GitHub API. After any rebase/merge, immediately run related tests. When a commit only mentions test/manifest changes but stat shows src changes, treat it as a red flag.
+
+### Metadata
+- Source: memory-lancedb-pro/self_improvement_log
+---
+
+
+## [ERR-20260421-002]
+
+**Logged**: 2026-04-21T13:29:46.253Z
+**Priority**: high
+**Status**: pending
+**Area**: tests
+
+### Summary
+Promise.all with store.store() triggered ELOCKED that propagated as test failure
+
+### Details
+lock-stale-threshold.test.mjs TC-6 used Promise.all() to fire 50 concurrent store.store() calls. ELOCKED errors propagated as unhandled Promise rejections, causing Node.js test runner to report exit code 1. The test's intent was to measure timing, but error propagation prevented any timing result.
+
+### Suggested Action
+When testing timing of lock-related operations, do not let errors propagate to the test framework. Use try/catch inside the test. If you want to test concurrency, acknowledge that some calls will fail with ELOCKED and handle that explicitly. Use sequential for...of loop when you need to ensure all entries are processed for timing comparison.
+
+### Metadata
+- Source: memory-lancedb-pro/self_improvement_log
+---
+
+
+## [ERR-20260421-003]
+
+**Logged**: 2026-04-21T13:29:51.154Z
+**Priority**: high
+**Status**: pending
+**Area**: tests
+
+### Summary
+smart-extractor-scope-filter.test.mjs MockStore was missing bulkStore() method
+
+### Details
+After PR #669 added bulkStore() to SmartExtractor.extractAndPersist, the MockStore in smart-extractor-scope-filter.test.mjs was not updated to implement bulkStore(). When the real SmartExtractor called this.store.bulkStore(), it threw "TypeError: this.store.bulkStore is not a function".
+
+### Suggested Action
+When modifying source code to add new method calls, scan all tests that mock that class and ensure the mock implements the new method. Add bulkStore() = async () => [] to any MockStore for SmartExtractor.
+
+### Metadata
+- Source: memory-lancedb-pro/self_improvement_log
+---
