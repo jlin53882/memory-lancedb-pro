@@ -218,3 +218,47 @@
 - **嚴重程度**：P3 — 輕量 bug，無實際功能性影響，但影響程式碼品質。
 - **修復建議**：刪除重複的 `"记得"` 項目。
 - **是否已記錄**：否（新發現）
+
+
+## 2026-04-21
+
+### PowerShell heredoc << 語法在 append 模式失敗
+
+**錯誤訊息**：'<' 運算子需要 '<<' 之後要有輸入來源
+
+**錯誤指令**：
+\cat >> test.mjs << 'ENDOFTEST'
+...content...
+ENDOFTEST
+\
+**原因**：PowerShell 把 << 視為 input redirection operator，不支援 heredoc 語法。'' 字元被錯誤處理。
+
+**繞過方式**：用 Python script 寫入檔案：
+\\python
+with open('file.mjs', 'a', encoding='utf-8') as f:
+    f.write(content)
+\
+**預防 Rule**：向現有檔案追加內容時，統一用 Python script。
+
+---
+
+### gh api --body-file 不存在，應用 --input
+
+**錯誤訊息**：unknown flag: --body-file
+
+**錯誤指令**：
+\gh api repos/owner/repo/issues/N/comments --body-file file.txt
+\
+**正確參數**：--input file（不是 --body-file）
+
+**替代方式**：Python urllib 直 call API（繞過 gh CLI 限制）。
+
+---
+
+### 對 bulkStore 實作的錯誤假設
+
+**問題**：一開始說「bulkStore 內部是 store.store() loop」，所以担心 1000 entry 會觸發 stale threshold。
+
+**實際**：bulkStore 是單次 	able.add(fullEntries) batch write，41ms 完成 1000 筆。
+
+**預防 Rule**：對程式碼行為有假設時，先讀 source code 確認再下結論。
