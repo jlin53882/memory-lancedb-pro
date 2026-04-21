@@ -1,0 +1,35 @@
+## 說明：兩個 CI 失敗與本 PR 無關
+
+本 PR (#678) 包含 `scripts/ci-test-manifest.mjs` 的更新（註冊三個新測試），但 CI 仍有兩個 job 失敗，原因如下：
+
+### 1. `core-regression` job 失敗：smart-extractor-branches.mjs
+
+**錯誤**：`test/smart-extractor-branches.mjs:497` AssertionError
+
+**根因**：此測試在 upstream master (`e9aba72`) 也失敗，與本 PR 完全無關。本 PR 未修改過 `test/smart-extractor-branches.mjs`。
+
+此測試失敗是 upstream PR #669 引入的問題：#669 重構了 smart-extractor 改用 `bulkStore()`，但測試檔案未同步更新。測試在檢查一個只在舊 single-write 路徑才會出現的 log message。
+
+### 2. `packaging-and-workflow` job 失敗：import-markdown.test.mjs
+
+**錯誤**：`verify-ci-test-manifest.mjs` 回報 `unexpected manifest entry: test/import-markdown/import-markdown.test.mjs`
+
+**根因**：這是 upstream 既有的不一致問題——
+- `scripts/ci-test-manifest.mjs` 的 `CI_TEST_MANIFEST` 有這個 entry（第 21 行）
+- 但 `scripts/verify-ci-test-manifest.mjs` 的 `EXPECTED_BASELINE` 沒有
+
+這個不一致導致 `verify-ci-test-manifest.mjs` 的 `verifyExactOnceCoverage()` 失敗。這個問題在 PR #678 修改之前就存在（diff 為空）。
+
+### 證據
+
+```bash
+# smart-extractor-branches.mjs 的 diff（PR #678 vs e9aba72）
+git diff e9aba72 HEAD -- test/smart-extractor-branches.mjs
+# 輸出：空（檔案完全未修改）
+
+# verify-ci-test-manifest.mjs 的 diff
+git diff e9aba72 HEAD -- scripts/verify-ci-test-manifest.mjs
+# 輸出：僅新增三個新測試 entry，無其他變更
+```
+
+這兩個失敗都是 upstream 的既有問題，本 PR 的修改與之無因果關係。

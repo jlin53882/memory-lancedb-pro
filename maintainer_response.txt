@@ -1,0 +1,65 @@
+@app3apps 感謝你的 review。以下是本 PR 的所有修改說明：
+
+---
+
+## ✅ 已修復：3 個問題全部處理
+
+### 問題 1：`handleSupersede` batch path 未失效舊記錄
+
+**修復方式**：新增 `invalidateEntries[]` 收集機制（commit `2d53249`）
+
+1. `extractAndPersist` 建立 `invalidateEntries[]` 陣列
+2. `handleSupersede` batch path：將舊 entry 的失效 metadata push 到 `invalidateEntries[]`
+3. `bulkStore(createEntries)` 完成後：對 `invalidateEntries[]` 中每筆記錄呼叫 `store.update()`
+
+**`superseded_by` 在 batch mode 的處理**：`superseded_by` 主動省略（設為 undefined），因為新 entry 的 ID 在 `bulkStore` 完成前未知。新 entry 的 `supersedes: matchId` 提供 authoritative dedup signal，這是 retriever 實際使用的欄位。
+
+**額外改善**（commit `b87f858`）：為 `invalidateEntries` 迴圈加入 try-catch + warn/error log，確保一個 update 失敗不會阻斷其他更新，並記錄失敗細節。
+
+---
+
+### 問題 2：測試使用本地 mock 函數，非真實實作
+
+**已完全重構為 Real Integration Tests：**
+
+#### `test/supersede-existing-found-bulk.test.mjs`（commit `bb24c13`）
+- 用 jiti import 真實的 `SmartExtractor`
+- MockStore 只用於追蹤 `store.store()` / `bulkStore()` / `store.update()` call counts
+- 測試真實的 `extractAndPersist()` 方法
+- 5 個 TC，覆蓋：SUPERSEDE batch mode、CREATE batch mode、bulkStore 單次呼叫、invalidation metadata、`supersedes` 欄位驗證、non-temporal category
+
+#### `test/regex-fallback-bulk-store.test.mjs`（commit `b7b70cf`）
+- 用 jiti import 真實的 `MemoryStore`（actual file-lock behavior）
+- 用 real `isUserMdExclusiveMemory`、`buildSmartMetadata`、`stringifySmartMetadata`
+- 使用 one-hot 向量 mock embedder（避免 false-positive dedup）
+- 6 個 TC，覆蓋：OLD pattern（N×store.store）、NEW pattern（1×bulkStore）、單一 text、empty texts、dedup 跳過、timing 對比
+
+---
+
+### 問題 3：`smart-extractor-scope-filter.test.mjs` TypeError
+
+**已修復**（上一個 commit）：在 MockStore 中加入 `bulkStore() { return entries; }` method，4/4 PASS。
+
+---
+
+## 📋 CI 狀態說明
+
+本 PR 的 CI 有 2 個失敗，但**都與本 PR 無關**（是 upstream 既有的問題）：
+
+| Job | 失敗原因 |
+|-----|---------|
+| `core-regression` | `smart-extractor-branches.mjs:497` 在 upstream master (`e9aba72`) 也 fail——本 PR 未修改過此檔案 |
+| `packaging-and-workflow` | `import-markdown.test.mjs` 在 `CI_TEST_MANIFEST` 有但 `EXPECTED_BASELINE` 沒有——upstream 的不一致 |
+
+詳細說明見：[#issuecomment-4288767001](https://github.com/CortexReach/memory-lancedb-pro/pull/678#issuecomment-4288767001)
+
+---
+
+## 📊 最新 commit
+
+`306c1d8` — 包含：
+- `src/smart-extractor.ts`：`invalidateEntries` 修復 + error handling
+- `test/supersede-existing-found-bulk.test.mjs`：重構為真實 SmartExtractor 測試
+- `test/regex-fallback-bulk-store.test.mjs`：重構為真實 MemoryStore 測試
+- `test/lock-stale-threshold.test.mjs`：新增（Issue #670/#675 lock 根因測試）
+- `scripts/ci-test-manifest.mjs` + `verify-ci-test-manifest.mjs`：註冊新測試

@@ -1,0 +1,18 @@
+## ✅ Plan A 已實作完成
+
+**修復內容**：兩階段處理
+- Phase 1: LLM enrichment（無 lock）
+- Phase 2: 單次 lock 寫入整批
+
+**Lock 改善**：
+- 10 entries: 10 locks → 1 lock (-90%)
+- 25 entries: 25 locks → 3 locks (-88%)
+
+**PR**：`jlin53882/memory-lancedb-pro#354`
+
+---
+
+## 📋 Plan B 追蹤 Issue
+
+如需進一步優化（完全無鎖），請參考 Issue #638：
+https://github.com/CortexReach/memory-lancedb-pro/issues/638
