@@ -353,6 +353,9 @@ function buildDerivedCandidates(
     const lines = sanitizeInjectableReflectionLines(toStringArray(metadata.derived));
     if (lines.length === 0) return [];
 
+    const owner = typeof metadata.agentId === "string" ? metadata.agentId.trim() : "";
+    if (owner === "main") return [];
+
     const defaults = {
       midpointDays: REFLECTION_DERIVE_LOGISTIC_MIDPOINT_DAYS,
       k: REFLECTION_DERIVE_LOGISTIC_K,
@@ -428,6 +431,21 @@ function isReflectionMetadataType(type: unknown): boolean {
 
 function isOwnedByAgent(metadata: Record<string, unknown>, agentId: string): boolean {
   const owner = typeof metadata.agentId === "string" ? metadata.agentId.trim() : "";
+
+  // itemKind 只存在於 memory-reflection-item 類型
+  // legacy (memory-reflection) 和 mapped (memory-reflection-mapped) 都沒有 itemKind
+  // 因此 undefined !== "derived"，會走原本的 main fallback（維持相容）
+  const itemKind = metadata.itemKind;
+
+  // 如果是 derived 項目（memory-reflection-item）：不做 main fallback，
+  // 且 derived 不允許空白 owner（空白 owner 的 derived 應完全不可見，防止洩漏）
+  // itemKind 必須是 string type，否則會錯誤進入 derived 分支（null/undefined/number 等應走 legacy fallback）
+  if (typeof itemKind === "string" && itemKind === "derived") {
+    if (!owner) return false;
+    return owner === agentId;
+  }
+
+  // invariant / legacy / mapped：允許空白 owner 可見，維持原本的 main fallback
   if (!owner) return true;
   return owner === agentId || owner === "main";
 }
