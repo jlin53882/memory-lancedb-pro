@@ -1653,6 +1653,19 @@ const pluginVersion = getPluginVersion();
 // hook/tool registration for the new API instance" regression that rwmjhb identified.
 let _registeredApis = new WeakSet<OpenClawPluginApi>();
 
+// Dual-track registration tracking:
+// - WeakSet: primary guard (has GC safety, no manual cleanup needed)
+// - Map: secondary tracking for test inspection and explicit rollback
+let _registeredApisMap = new Map<OpenClawPluginApi, boolean>();
+
+/**
+ * Returns the internal Map for test inspection.
+ * @public
+ */
+export function _getRegisteredApisForTest(): Map<OpenClawPluginApi, boolean> {
+  return _registeredApisMap;
+}
+
 // ============================================================================
 // Hook Event Deduplication (Phase 1)
 // ============================================================================
@@ -1909,7 +1922,13 @@ const memoryLanceDBProPlugin = {
     //   - Memory heap growth from repeated resource creation (~9 calls/process)
     //   - Accumulated session Maps being lost on re-registration
     // ========================================================================
-    if (!_singletonState) { _singletonState = _initPluginState(api); }
+    _registeredApisMap.set(api, true);  // claim before init (early track)
+    try {
+      if (!_singletonState) { _singletonState = _initPluginState(api); }
+    } catch (err) {
+      _registeredApisMap.delete(api);  // rollback: init failed
+      throw err;
+    }
     const {
       config,
       resolvedDbPath,
@@ -4264,6 +4283,7 @@ export { getDefaultMdMirrorDir };
  */
 export function resetRegistration() {
   _registeredApis = new WeakSet<OpenClawPluginApi>();
+  _registeredApisMap.clear();
   _singletonState = null;
   _hookEventDedup.clear();
 }
