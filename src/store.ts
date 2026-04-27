@@ -216,13 +216,6 @@ export class MemoryStore {
       try { mkdirSync(dirname(lockPath), { recursive: true }); } catch {}
       try { const { writeFileSync } = await import("node:fs"); writeFileSync(lockPath, "", { flag: "wx" }); } catch {}
     }
-    // 【修復 #415】調整 retries：max wait 從 ~3100ms → ~151秒
-    // 指數退避：1s, 2s, 4s, 8s, 16s, 30s×5，總計約 151 秒
-    // ECOMPROMISED 透過 onCompromised callback 觸發（非 throw），使用 flag 機制正確處理
-    let isCompromised = false;
-    let compromisedErr: unknown = null;
-    let fnSucceeded = false;
-    let fnError: unknown = null;
 
     // Proactive cleanup of stale lock artifacts（from PR #626）
     // 根本避免 >5 分鐘的 lock artifact 導致 ECOMPROMISED
@@ -238,9 +231,17 @@ export class MemoryStore {
       } catch {}
     }
 
+    // 【修復 #415】調整 retries：max wait 從 ~3100ms → ~151秒
+    // 指數退避：1s, 2s, 4s, 8s, 16s, 30s×5，總計約 151 秒
+    // ECOMPROMISED 透過 onCompromised callback 觸發（非 throw），使用 flag 機制正確處理
+    let isCompromised = false;
+    let compromisedErr: unknown = null;
+    let fnSucceeded = false;
+    let fnError: unknown = null;
+
     const release = await lockfile.lock(lockPath, {
       retries: {
-        retries: 10,
+        retries: 10,       // 從 5 → 10，讓 max wait 可覆蓋更長的 event loop block
         factor: 2,
         minTimeout: 1000, // James 保守設定：避免高負載下過度密集重試
         maxTimeout: 30000, // James 保守設定：支撐更久的 event loop 阻塞
@@ -273,7 +274,7 @@ export class MemoryStore {
           // ERELEASED 是預期行為（compromised lock release），忽略
         } else {
           // release() 錯誤優先於 fn() 錯誤：若 release 本身失敗，視為更嚴重的問題
-          // 而非靜默忽略（這是有意的設計選擇，不反映 fn 的錯誤）
+          // 並非靜默忽略（這是有意的設計選擇，不反映 fn 的錯誤）
           throw e;
         }
       }
