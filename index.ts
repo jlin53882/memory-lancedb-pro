@@ -2218,22 +2218,26 @@ const memoryLanceDBProPlugin = {
     }
 
     api.on("message_received", (event: any, ctx: any) => {
-      const conversationKey = buildAutoCaptureConversationKeyFromIngress(
-        ctx.channelId,
-        ctx.conversationId,
-      );
-      const normalized = normalizeAutoCaptureText("user", event.content, shouldSkipReflectionMessage);
-      if (conversationKey && normalized) {
-        if (normalized.length > MAX_MESSAGE_LENGTH) {
-          api.logger.debug(
-            `memory-lancedb-pro: skipped pending ingress text (len=${normalized.length} > ${MAX_MESSAGE_LENGTH}) channel=${ctx.channelId}`,
-          );
-        } else {
-          const queue = autoCapturePendingIngressTexts.get(conversationKey) || [];
-          queue.push(normalized);
-          autoCapturePendingIngressTexts.set(conversationKey, queue.slice(-6));
-          pruneMapIfOver(autoCapturePendingIngressTexts, AUTO_CAPTURE_MAP_MAX_ENTRIES);
+      try {
+        const conversationKey = buildAutoCaptureConversationKeyFromIngress(
+          ctx.channelId,
+          ctx.conversationId,
+        );
+        const normalized = normalizeAutoCaptureText("user", event.content, shouldSkipReflectionMessage);
+        if (conversationKey && normalized) {
+          if (normalized.length > MAX_MESSAGE_LENGTH) {
+            api.logger.debug(
+              `memory-lancedb-pro: skipped pending ingress text (len=${normalized.length} > ${MAX_MESSAGE_LENGTH}) channel=${ctx.channelId}`,
+            );
+          } else {
+            const queue = autoCapturePendingIngressTexts.get(conversationKey) || [];
+            queue.push(normalized);
+            autoCapturePendingIngressTexts.set(conversationKey, queue.slice(-6));
+            pruneMapIfOver(autoCapturePendingIngressTexts, AUTO_CAPTURE_MAP_MAX_ENTRIES);
+          }
         }
+      } catch (err) {
+        api.logger.warn(`memory-lancedb-pro: message_received auto-capture error: ${String(err)}`);
       }
       api.logger.debug(
         `memory-lancedb-pro: ingress message_received channel=${ctx.channelId} account=${ctx.accountId || "unknown"} conversation=${ctx.conversationId || "unknown"} from=${event.from} len=${event.content.trim().length} preview=${summarizeTextPreview(event.content)}`,
