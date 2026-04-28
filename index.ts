@@ -2966,10 +2966,19 @@ const memoryLanceDBProPlugin = {
                 `memory-lancedb-pro: auto-capture running smart extraction for agent ${agentId} (${cleanTexts.length} clean texts >= ${minMessages}, cumulative=${cumulativeCount})`,
               );
               const conversationText = cleanTexts.join("\n");
-              const stats = await smartExtractor.extractAndPersist(
-                conversationText, sessionKey,
-                { scope: defaultScope, scopeFilter: accessibleScopes },
-              );
+              // issue #417 Fix #10: prevent hook crash on LLM API errors / network timeouts
+              let stats: Awaited<ReturnType<typeof smartExtractor.extractAndPersist>> | null = null;
+              try {
+                stats = await smartExtractor.extractAndPersist(
+                  conversationText, sessionKey,
+                  { scope: defaultScope, scopeFilter: accessibleScopes },
+                );
+              } catch (err) {
+                api.logger.error(
+                  `memory-lancedb-pro: smart-extract failed for agent ${agentId}: ${String(err)}`,
+                );
+                return; // prevent hook crash — fall through to regex fallback is intentionally skipped
+              }
               // Charge rate limiter only after successful extraction
               extractionRateLimiter.recordExtraction();
               if (stats.created > 0 || stats.merged > 0) {
