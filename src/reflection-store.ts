@@ -322,7 +322,7 @@ function buildInvariantCandidates(
   });
 }
 
-function buildDerivedCandidates(
+export function buildDerivedCandidates(
   itemRows: Array<{ entry: MemoryEntry; metadata: Record<string, unknown> }>,
   legacyRows: Array<{ entry: MemoryEntry; metadata: Record<string, unknown> }>,
   agentId: string
