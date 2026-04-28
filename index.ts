@@ -248,6 +248,26 @@ interface PluginConfig {
     /** Keywords indicating user correction/error for a non-recalled memory */
     errorKeywords?: string[];
   };
+  /**
+   * Metadata field to use as the category label in auto-recall prefix lines.
+   * When set, the value of `metadata[categoryField]` replaces the built-in
+   * category in the `[category:scope]` prefix — if the field is present on
+   * the entry. Falls back to the built-in category when the field is absent.
+   *
+   * Useful for import-based workflows where entries carry a meaningful
+   * grouping label in a custom metadata field (e.g. "folder" for Apple Notes
+   * imports, "notebook" for Notion, "collection" for Obsidian).
+   *
+   * Default: unset — built-in category is used for all entries.
+   *
+   * @example
+   * recallPrefix: { categoryField: "folder" }
+   * // Entry with metadata.folder = "Goals" → prefix: [W][Goals:global]
+   * // Entry without metadata.folder       → prefix: [W][preference:global]
+   */
+  recallPrefix?: {
+    categoryField?: string;
+  };
 }
 
 type ReflectionThinkLevel = "off" | "minimal" | "low" | "medium" | "high";
@@ -3071,8 +3091,13 @@ const memoryLanceDBProPlugin = {
             `memory-lancedb-pro: regex fallback found ${toCapture.length} capturable text(s) for agent ${agentId}`,
           );
 
-          // Store each capturable piece (limit to 2 per conversation)
-          let stored = 0;
+          // FIX #675: Collect entries and use bulkStore() once (1 lock instead of N).
+          // Limit to 2 capturable pieces per conversation.
+          const capturedEntries: Array<{
+            text: string; vector: number[]; importance: number;
+            category: string; scope: string; metadata: string;
+          }> = [];
+
           for (const text of toCapture.slice(0, 2)) {
             if (isUserMdExclusiveMemory({ text }, config.workspaceBoundary)) {
               api.logger.info(
@@ -3084,8 +3109,8 @@ const memoryLanceDBProPlugin = {
             const category = detectCategory(text);
             const vector = await embedder.embedPassage(text);
 
-            // Check for duplicates using raw vector similarity (bypasses importance/recency weighting)
-            // Fail-open by design: dedup should not block auto-capture writes.
+            // FIX #675: Dedup check stays in loop — must check each text individually
+            // before adding to batch. Fail-open: dedup error does NOT block write.
             let existing: Awaited<ReturnType<typeof store.vectorSearch>> = [];
             try {
               existing = await store.vectorSearch(vector, 1, 0.1, [
@@ -3101,7 +3126,7 @@ const memoryLanceDBProPlugin = {
               continue;
             }
 
-            await store.store({
+            capturedEntries.push({
               text,
               vector,
               importance: 0.7,
@@ -3133,21 +3158,48 @@ const memoryLanceDBProPlugin = {
                 ),
               ),
             });
-            stored++;
-
-            // Dual-write to Markdown mirror if enabled
-            if (mdMirror) {
-              await mdMirror(
-                { text, category, scope: defaultScope, timestamp: Date.now() },
-                { source: "auto-capture", agentId },
-              );
-            }
           }
 
-          if (stored > 0) {
-            api.logger.info(
-              `memory-lancedb-pro: auto-captured ${stored} memories for agent ${agentId} in scope ${defaultScope}`,
-            );
+          // FIX #675: bulkStore once (1 lock for N entries) instead of N store.store() calls.
+          // FIX #Bug-1 (post-Codex-review): mdMirror errors are handled separately and do NOT
+          // trigger the store.store() fallback (which would create duplicate rows).
+          if (capturedEntries.length > 0) {
+            try {
+              await store.bulkStore(capturedEntries);
+              api.logger.info(
+                `memory-lancedb-pro: auto-captured ${capturedEntries.length} memories for agent ${agentId} in scope ${defaultScope} (bulkStore)`,
+              );
+            } catch (err) {
+              api.logger.warn(
+                `memory-lancedb-pro: bulkStore failed for ${capturedEntries.length} entries, falling back to individual store: ${String(err)}`,
+              );
+              // Fallback: store individually (less efficient but preserves the data)
+              for (const entry of capturedEntries) {
+                await store.store(entry);
+              }
+              api.logger.info(
+                `memory-lancedb-pro: auto-captured ${capturedEntries.length} memories for agent ${agentId} (individual fallback)`,
+              );
+            }
+
+            // FIX #Bug-1: mdMirror is called AFTER bulkStore succeeds, with its own
+            // error handling. If mdMirror fails, bulkStore is ALREADY committed —
+            // we log the error and continue. We do NOT retry via store.store()
+            // (which would create duplicate rows in LanceDB).
+            if (mdMirror) {
+              for (const entry of capturedEntries) {
+                try {
+                  await mdMirror(
+                    { text: entry.text, category: entry.category, scope: defaultScope, timestamp: Date.now() },
+                    { source: "auto-capture", agentId },
+                  );
+                } catch (mdErr) {
+                  api.logger.warn(
+                    `memory-lancedb-pro: mdMirror failed for entry "${entry.text.slice(0, 40)}…", bulkStore already committed: ${String(mdErr)}`,
+                  );
+                }
+              }
+            }
           }
         } catch (err) {
           api.logger.warn(`memory-lancedb-pro: capture failed: ${String(err)}`);
@@ -4543,6 +4595,18 @@ export function parsePluginConfig(value: unknown): PluginConfig {
     feedback: typeof cfg.feedback === "object" && cfg.feedback !== null
       ? { ...(cfg.feedback as Record<string, unknown>) }
       : {},
+    // Bug 3 fix (codex review): restore recallPrefix parsing that was accidentally
+    // removed when the feedback block was added. The auto-recall prefix builder at
+    // line ~2616 still reads config.recallPrefix?.categoryField and needs this mapping.
+    recallPrefix:
+      typeof cfg.recallPrefix === "object" && cfg.recallPrefix !== null
+        ? {
+            categoryField:
+              typeof (cfg.recallPrefix as Record<string, unknown>).categoryField === "string"
+                ? ((cfg.recallPrefix as Record<string, unknown>).categoryField as string)
+                : undefined,
+          }
+        : undefined,
   };
 }
 
