@@ -442,14 +442,31 @@ type EmbeddedPiRunner = (params: Record<string, unknown>) => Promise<unknown>;
 const requireFromHere = createRequire(import.meta.url);
 let embeddedPiRunnerPromise: Promise<EmbeddedPiRunner> | null = null;
 
-function toImportSpecifier(value: string): string {
+export function toImportSpecifier(value: string): string {
   const trimmed = value.trim();
   if (!trimmed) return "";
   if (trimmed.startsWith("file://")) return trimmed;
   if (trimmed.startsWith("/")) return pathToFileURL(trimmed).href;
+  // Handle Windows absolute paths (e.g. C:\Users\... or D:/Program Files/...) — PR #593
+  if (process.platform === 'win32' && /^[a-zA-Z]:[/\\]/.test(trimmed)) return pathToFileURL(trimmed).href;
+  // Handle UNC paths (\\server\share or \\?\UNC\\server\share) — PR #593
+  // Regex breakdown: ^\\\\  = starts with \\
+  //                  [^\\]+   = server name (one or more non-backslash chars)
+  //                  \\[^\\]+ = \ + share name (one or more non-backslash chars)
+  // Examples matched: \\server\share, \\fileserver\company-share, \\?\UNC\server\share
+  // Examples NOT matched: C:\path (drive letter, handled above), /unix/path (POSIX)
+  if (process.platform === 'win32' && /^\\\\[^\\]+\\[^\\]+/.test(trimmed)) {
+    // Extended prefix \\?\UNC\\ means "long UNC name" — already normalized.
+    // Pass directly so we don't double-normalize (e.g. avoid \\?\UNC\\?\UNC\\...).
+    if (trimmed.startsWith('\\\\?\\UNC\\')) return pathToFileURL(trimmed).href;
+    // Standard UNC: \\server\share -> \\?\UNC\\server\share -> file://server/share
+    // strip leading \\ (2 chars) -> server\share, then prefix \\?\UNC\\
+    const normalized = '\\\\?\\UNC\\' + trimmed.slice(2);
+    return pathToFileURL(normalized).href;
+  }
   return trimmed;
 }
-function getExtensionApiImportSpecifiers(): string[] {
+export function getExtensionApiImportSpecifiers(): string[] {
   const envPath = process.env.OPENCLAW_EXTENSION_API_PATH?.trim();
   const specifiers: string[] = [];
 
@@ -465,6 +482,11 @@ function getExtensionApiImportSpecifiers(): string[] {
   specifiers.push(toImportSpecifier("/usr/lib/node_modules/openclaw/dist/extensionAPI.js"));
   specifiers.push(toImportSpecifier("/usr/local/lib/node_modules/openclaw/dist/extensionAPI.js"));
   specifiers.push(toImportSpecifier("/opt/homebrew/lib/node_modules/openclaw/dist/extensionAPI.js"));
+
+  if (process.platform === "win32" && process.env.APPDATA) {
+    const windowsNpmPath = join(process.env.APPDATA, "npm", "node_modules", "openclaw", "dist", "extensionAPI.js");
+    specifiers.push(toImportSpecifier(windowsNpmPath));
+  }
 
   return [...new Set(specifiers.filter(Boolean))];
 }

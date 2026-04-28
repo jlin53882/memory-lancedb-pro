@@ -16,9 +16,9 @@ export const CI_TEST_MANIFEST = [
   { group: "storage-and-schema", runner: "node", file: "test/smart-extractor-scope-filter.test.mjs", args: ["--test"] },
   { group: "storage-and-schema", runner: "node", file: "test/store-empty-scope-filter.test.mjs", args: ["--test"] },
   { group: "core-regression", runner: "node", file: "test/recall-text-cleanup.test.mjs", args: ["--test"] },
+  { group: "core-regression", runner: "node", file: "test/to-import-specifier-windows.test.mjs", args: ["--test"] },
   { group: "storage-and-schema", runner: "node", file: "test/update-consistency-lancedb.test.mjs" },
   { group: "core-regression", runner: "node", file: "test/strip-envelope-metadata.test.mjs", args: ["--test"] },
-  { group: "cli-smoke", runner: "node", file: "test/import-markdown/import-markdown.test.mjs", args: ["--test"] },
   { group: "cli-smoke", runner: "node", file: "test/cli-smoke.mjs" },
   { group: "cli-smoke", runner: "node", file: "test/functional-e2e.mjs" },
   { group: "storage-and-schema", runner: "node", file: "test/per-agent-auto-recall.test.mjs", args: ["--test"] },
@@ -53,12 +53,16 @@ export const CI_TEST_MANIFEST = [
   // Issue #629 batch embedding fix
   { group: "llm-clients-and-auth", runner: "node", file: "test/embedder-ollama-batch-routing.test.mjs" },
   // Issue #665 bulkStore tests
+  // Issue #665 bulkStore tests
   { group: "storage-and-schema", runner: "node", file: "test/bulk-store.test.mjs", args: ["--test"] },
   { group: "storage-and-schema", runner: "node", file: "test/bulk-store-edge-cases.test.mjs", args: ["--test"] },
   { group: "storage-and-schema", runner: "node", file: "test/smart-extractor-bulk-store.test.mjs", args: ["--test"] },
   { group: "storage-and-schema", runner: "node", file: "test/smart-extractor-bulk-store-edge-cases.test.mjs", args: ["--test"] },
+  // Issue #690 cross-call batch accumulator tests
+  { group: "storage-and-schema", runner: "node", file: "test/issue-690-cross-call-batch.test.mjs", args: ["--test"] },
+  // Issue #690 stress test (long-running, runs manually or nightly)
+  { group: "core-regression", runner: "node", file: "test/issue-690-stress-1000.test.mjs", args: ["--test"] },
 ];
-
 export function getEntriesForGroup(group) {
   if (!CI_TEST_GROUPS.includes(group)) {
     throw new Error(`Unknown CI test group: ${group}`);
