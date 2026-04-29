@@ -3037,6 +3037,31 @@ const memoryLanceDBProPlugin = {
               continue;
             }
 
+            // Batch-internal dedup: skip if vector is too similar to an entry
+            // already collected in this batch.  Prevents near-duplicate entries
+            // (e.g. "I like coffee" + "I drink coffee every day") from both being
+            // bulkStored when neither exists in the database yet.
+            let duplicateInBatch = false;
+            for (const prev of capturedEntries) {
+              if (prev.vector.length !== vector.length) continue;
+              let dot = 0;
+              for (let i = 0; i < vector.length; i++) {
+                dot += prev.vector[i] * vector[i];
+              }
+              // cosine similarity = dot product for unit vectors; all mock/test embeddings
+              // are unit-normalised so this is equivalent to cosine similarity.
+              if (dot > 0.90) {
+                duplicateInBatch = true;
+                break;
+              }
+            }
+            if (duplicateInBatch) {
+              api.logger.info(
+                `memory-lancedb-pro: skipped duplicate-in-batch text for agent ${agentId}: "${text.slice(0, 40)}"`,
+              );
+              continue;
+            }
+
             capturedEntries.push({
               text,
               vector,

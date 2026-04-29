@@ -77,6 +77,8 @@ async function regexFallbackOldPattern(store, embedder, texts, scope, sessionKey
 }
 
 // NEW pattern: collect then bulkStore once = 1 lock
+// FIX Bug #3: batch-internal dedup — skip texts whose vector is too similar
+// to an entry already in capturedEntries (prevents duplicate entries in the same batch).
 async function regexFallbackNewPattern(store, embedder, texts, scope, sessionKey) {
   const toCapture = texts.filter((t) => t && t.trim().length > 0);
   const capturedEntries = [];
@@ -88,6 +90,15 @@ async function regexFallbackNewPattern(store, embedder, texts, scope, sessionKey
     try { existing = await store.vectorSearch(vector, 1, 0.9, [scope]); } catch { /* fail-open */ }
     if (existing.length > 0 && existing[0].score > 0.90) continue;
     // FIX #675: collect instead of immediate store
+    // FIX Bug #3: batch-internal dedup
+    let duplicateInBatch = false;
+    for (const prev of capturedEntries) {
+      if (prev.vector.length !== vector.length) continue;
+      let dot = 0;
+      for (let i = 0; i < vector.length; i++) dot += prev.vector[i] * vector[i];
+      if (dot > 0.90) { duplicateInBatch = true; break; }
+    }
+    if (duplicateInBatch) continue;
     capturedEntries.push({ text, vector, importance: 0.7, category, scope, metadata: makeMetadata(text, category, sessionKey) });
   }
   // FIX #675: single bulkStore = 1 lock for N entries
@@ -242,5 +253,38 @@ describe("Issue #675: Regex Fallback bulkStore (Real Integration)", () => {
       rmSync(dirOld, { recursive: true, force: true });
       rmSync(dirNew, { recursive: true, force: true });
     }
+  });
+
+  // FIX Bug #3: Batch-internal dedup regression test
+  // Two near-identical texts pass the DB dedup check (no existing entry),
+  // but the second is skipped because it is too similar to the first in the batch.
+  it("Batch-internal dedup: second near-duplicate skipped within same batch", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "rx-batch-dedup-"));
+    try {
+      const store = new TrackingStore(new MemoryStore({ dbPath: dir, vectorDim: 4 }));
+      const scope = "agent:test";
+      const sessionKey = "s7-batch-dedup";
+
+      // Both texts return the SAME vector (cosine sim = 1.0).
+      // Neither is in the DB, so the DB dedup check passes for both.
+      // The second should be caught by batch-internal dedup.
+      const sharedVector = [0.7071, 0.7071];  // unit-normalised
+      let callCount = 0;
+      const embedder = {
+        embedPassage: async (_text) => {
+          callCount++;
+          return sharedVector;
+        },
+      };
+
+      const texts = ["I really like coffee", "I really like coffee too"];
+      const stored = await regexFallbackNewPattern(store, embedder, texts, scope, sessionKey);
+
+      assert.strictEqual(callCount, 2, "Both texts are embedded");
+      assert.strictEqual(store._bulkCount, 1, "One bulkStore call");
+      assert.strictEqual(store._bulkEntries.length, 1, "Only 1 entry stored (second deduped)");
+      assert.strictEqual(store._bulkEntries[0].text, "I really like coffee", "First text stored, second skipped");
+      assert.strictEqual(stored, 1, "Returns 1 (one entry actually stored)");
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });
