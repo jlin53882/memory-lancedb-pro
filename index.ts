@@ -262,6 +262,27 @@ type ReflectionInjectMode = "inheritance-only" | "inheritance+derived";
 // Default Configuration
 // ============================================================================
 
+/**
+ * Resolve openclaw home directory by reading openclaw.json (which declares `home`),
+ * with fallback to OPENCLAW_HOME env-var and then ~/.openclaw/.
+ * Returns undefined if openclaw.json cannot be read.
+ */
+function resolveOpenclawHomeFromConfig(): string | undefined {
+  try {
+    const openclawHome = process.env.OPENCLAW_HOME || join(homedir(), ".openclaw");
+    const configPath = join(openclawHome, "openclaw.json");
+    const raw = readFileSync(configPath, "utf8");
+    const parsed = JSON.parse(raw);
+    // openclaw.json may declare a custom home directory
+    if (parsed?.home && typeof parsed.home === "string") {
+      return parsed.home;
+    }
+    return openclawHome;
+  } catch {
+    return undefined;
+  }
+}
+
 function getDefaultDbPath(): string {
   const home = homedir();
   return join(home, ".openclaw", "memory", "lancedb-pro");
@@ -3184,23 +3205,11 @@ const memoryLanceDBProPlugin = {
         return;
       }
 
-      // Extract injected IDs from prependContext if available
-      // The auto-recall injects memories with IDs in the injectedIds field
-      const injectedIds: string[] = [];
-      if (event.prependContext && typeof event.prependContext === "string") {
-        // Parse IDs from injected context - format is typically "- [category:scope] summary"
-        // We'll check if any recall IDs are present in the context
-        const match = event.prependContext.match(/\[([a-f0-9]{8,})\]/gi);
-        if (match) {
-          for (const m of match) {
-            const id = m.slice(1, -1);
-            if (id.length >= 8) injectedIds.push(id);
-          }
-        }
-      }
-
-      // Update pending recall entry with IDs
-      pending.recallIds = injectedIds;
+      // Use recallIds directly from pendingRecall — these were stored by auto-recall
+      // in before_prompt_build (Turn N). agent_end wrote responseText into the same
+      // entry. No regex parsing needed; prependContext uses [category:scope] format
+      // and does NOT contain memory IDs.
+      const injectedIds: string[] = pending.recallIds;
 
       // Check if any recall was actually used by checking if the response contains reference to the injected content
       // This is a heuristic - we check if the response shows awareness of injected memories
@@ -3263,6 +3272,10 @@ const memoryLanceDBProPlugin = {
           api.logger.warn(`memory-lancedb-pro: recall usage scoring failed: ${String(err)}`);
         }
       }
+
+      // P2 fix: clear scored entry so subsequent turns don't re-score the same
+      // recallIds against a new responseText (would distort importance over time)
+      pendingRecall.delete(sessionKey);
     }, { priority: 5 });
 
     // ========================================================================
@@ -4037,9 +4050,13 @@ const memoryLanceDBProPlugin = {
 
     async function runBackup() {
       try {
-        const backupDir = api.resolvePath(
-          join(resolvedDbPath, "..", "backups"),
-        );
+        // Resolve backup directory from openclaw.json (respects `home` field),
+        // with fallback to OPENCLAW_HOME / ~/.openclaw/. This is robust even when
+        // dbPath is unset or the plugin was upgraded from an older version.
+        const openclawHome = resolveOpenclawHomeFromConfig()
+          ?? process.env.OPENCLAW_HOME
+          ?? join(homedir(), ".openclaw");
+        const backupDir = api.resolvePath(join(openclawHome, "backups"));
         await mkdir(backupDir, { recursive: true });
 
         const allMemories = await store.list(undefined, undefined, 10000, 0);
