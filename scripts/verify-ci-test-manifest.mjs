@@ -63,6 +63,8 @@ const EXPECTED_BASELINE = [
   // Issue #492 agentId validation tests
   { group: "core-regression", runner: "node", file: "test/agentid-validation.test.mjs", args: ["--test"] },
   { group: "core-regression", runner: "node", file: "test/command-reflection-guard.test.mjs", args: ["--test"] },
+  // Issue #704 Redis distributed lock — URL parsing fix
+  { group: "storage-and-schema", runner: "node", file: "test/redis-url-parsing.test.mjs" },
 ];
 
 function fail(message) {
