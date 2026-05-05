@@ -65,6 +65,8 @@ const EXPECTED_BASELINE = [
   // Issue #492 agentId validation tests
   { group: "core-regression", runner: "node", file: "test/agentid-validation.test.mjs", args: ["--test"] },
   { group: "core-regression", runner: "node", file: "test/command-reflection-guard.test.mjs", args: ["--test"] },
+  // Issue #606 SDK migration regression tests
+  { group: "core-regression", runner: "node", file: "test/issue606_sdk-migration.test.mjs" },
 ];
 
 function fail(message) {

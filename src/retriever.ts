@@ -595,10 +595,8 @@ export class MemoryRetriever {
       dropSummary: [],
     };
 
-    try {
-      // Create trace only when stats collector is active (zero overhead otherwise)
-      const trace = this._statsCollector ? new TraceCollector() : undefined;
-
+    // Create trace only when stats collector is active (zero overhead otherwise)
+    const trace = this._statsCollector ? new TraceCollector() : undefined;
     // Check if query contains tag prefixes -> use BM25-only + mustContain.
     // Auto-recall is latency-sensitive and runs inline during prompt assembly.
     // Route it through local BM25-only retrieval so prompt building never waits
