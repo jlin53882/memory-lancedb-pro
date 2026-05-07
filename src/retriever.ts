@@ -1612,21 +1612,28 @@ export class MemoryRetriever {
   ): RetrievalResult[] {
     if (results.length <= 1) return results;
 
+    // Pre-convert all vectors to JS arrays ONCE at entry (optimization)
+    const vectors = results.map(r => {
+      const v = r.entry.vector;
+      return v?.length ? Array.from(v as Iterable<number>) : null;
+    });
+
     const selected: RetrievalResult[] = [];
     const deferred: RetrievalResult[] = [];
 
-    for (const candidate of results) {
+    for (let i = 0; i < results.length; i++) {
+      const candidate = results[i];
+      const cVec = vectors[i];
+      if (!cVec) {
+        selected.push(candidate);
+        continue;
+      }
+
       // Check if this candidate is too similar to any already-selected result
-      const tooSimilar = selected.some((s) => {
-        // Both must have vectors to compare.
-        // LanceDB returns Arrow Vector objects (not plain arrays),
-        // so use .length directly and Array.from() for conversion.
-        const sVec = s.entry.vector;
-        const cVec = candidate.entry.vector;
-        if (!sVec?.length || !cVec?.length) return false;
-        const sArr = Array.from(sVec as Iterable<number>);
-        const cArr = Array.from(cVec as Iterable<number>);
-        const sim = cosineSimilarity(sArr, cArr);
+      const tooSimilar = selected.some((s, si) => {
+        const sVec = vectors[results.findIndex(r => r.entry.id === s.entry.id)];
+        if (!sVec) return false;
+        const sim = cosineSimilarity(sVec, cVec);
         return sim > similarityThreshold;
       });
 
