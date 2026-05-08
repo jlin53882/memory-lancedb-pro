@@ -1,0 +1,344 @@
+# Issue #692 AST-based Semantic Chunking — 對抗式邏輯審查
+
+你是程式碼安全與邏輯審查專家。用繁體中文直接回答，不需要問問題。
+
+## 重要前提
+
+Claude Code 的工作目錄隔離於 WSL repo 之外，無法讀取本機路徑的程式碼。**以下是本機 `chunker.ts` 的完整程式碼（所有新實作的 functions），請直接根據這些程式碼做推理，不要聲稱「找不到檔案」。**
+
+---
+
+## 實作程式碼
+
+### detectCodeLanguage + CODE_LANGUAGE_PATTERNS (chunker.ts:196-237)
+
+```typescript
+type CodeLanguage = 'javascript' | 'typescript' | 'python' | 'go' | 'rust';
+
+const CODE_LANGUAGE_PATTERNS: Array<{ pattern: RegExp; lang: CodeLanguage }> = [
+  // Python: must check before JS (def/class are specific)
+  {
+    pattern: /\b(def\s|class\s|import\s|from\s|async\s+def\s|print\()/,
+    lang: 'python',
+  },
+  // Go: func and package keywords
+  {
+    pattern: /\b(func\s|package\s|import\s")/,
+    lang: 'go',
+  },
+  // Rust: fn/impl/pub are distinct
+  {
+    pattern: /\bfn\s|impl\s|pub\s|let\s+mut\s/,
+    lang: 'rust',
+  },
+  // TypeScript: interface / type alias / : type annotations (check before JS 'function')
+  {
+    pattern: /\b(interface\s|type\s+|:\\s*(?:string|number|boolean|unknown|never|any|void|object|Error|Promise|Record|Array|Map|Set)\b)/,
+    lang: 'typescript',
+  },
+  // JavaScript / TypeScript: function, const/let/var, arrow, import/export, class
+  {
+    pattern: /\b(function|const\s|let\s|var\s|=>|import\s|export\s|class\s)/,
+    lang: 'javascript',
+  },
+];
+
+export function detectCodeLanguage(text: string): CodeLanguage | null {
+  const sample = text.slice(0, 400);
+  for (const { pattern, lang } of CODE_LANGUAGE_PATTERNS) {
+    if (pattern.test(sample)) return lang;
+  }
+  return null;
+}
+```
+
+### isDeclarationNode + subChunk (chunker.ts:239-276)
+
+```typescript
+const JS_DECLARATION_TYPES = new Set([
+  'function_declaration',
+  'class_declaration',
+  'method_definition',
+  'arrow_function',
+  'export_statement',
+  'export_default_declaration',
+  'interface_declaration',
+  'type_alias_declaration',
+  'lexical_declaration',
+  'variable_declaration',
+]);
+
+const PYTHON_DECLARATION_TYPES = new Set([
+  'function_definition',
+  'class_definition',
+  'decorated_definition',
+]);
+
+function isDeclarationNode(node: { type: string }, lang: CodeLanguage): boolean {
+  if (lang === 'javascript' || lang === 'typescript') {
+    return JS_DECLARATION_TYPES.has(node.type);
+  }
+  if (lang === 'python') return PYTHON_DECLARATION_TYPES.has(node.type);
+  return false;
+}
+
+function subChunk(text: string, config: ChunkerConfig): ChunkResult {
+  // For now, fall back to the character-based chunker within an oversized declaration.
+  return chunkDocument(text, config);
+}
+```
+
+### astChunk (chunker.ts:286-389)
+
+```typescript
+export function astChunk(
+  code: string,
+  language: CodeLanguage,
+  config: ChunkerConfig
+): ChunkResult {
+  let LanguageMap: Record<string, any>;
+  let TreeSitterParser: any;
+
+  try {
+    TreeSitterParser = require('tree-sitter');
+
+    if (language === 'javascript' || language === 'typescript') {
+      const JavaScript = require('tree-sitter-javascript');
+      LanguageMap = { javascript: JavaScript, typescript: JavaScript };
+    } else if (language === 'python') {
+      const Python = require('tree-sitter-python');
+      LanguageMap = { python: Python };
+    } else {
+      return chunkDocument(code, config);
+    }
+  } catch {
+    return chunkDocument(code, config);
+  }
+
+  const parser = new TreeSitterParser();
+  const chunks: string[] = [];
+  const metadatas: ChunkMetadata[] = [];
+
+  let languageSet = false;
+  for (const [, langModule] of Object.entries(LanguageMap)) {
+    try {
+      parser.setLanguage(langModule);
+      languageSet = true;
+      break;
+    } catch {
+      // try next language
+    }
+  }
+
+  if (!languageSet) {
+    return chunkDocument(code, config);
+  }
+
+  let tree: any;
+  try {
+    tree = parser.parse(code);
+  } catch {
+    return chunkDocument(code, config);
+  }
+
+  const root = tree.rootNode;
+
+  // Walk top-level children
+  for (const child of root.children) {
+    // Skip non-named nodes and ERROR nodes
+    if (!child.type || child.type === 'ERROR') continue;
+
+    if (!isDeclarationNode(child, language)) continue;
+
+    const text = code.slice(child.startIndex, child.endIndex);
+
+    if (text.length === 0) continue;
+
+    if (text.length <= config.maxChunkSize) {
+      chunks.push(text);
+      metadatas.push({
+        startIndex: child.startIndex,
+        endIndex: child.endIndex,
+        length: text.length,
+      });
+    } else {
+      // Oversized declaration: keep it as one atomic chunk.
+      chunks.push(text);
+      metadatas.push({
+        startIndex: child.startIndex,
+        endIndex: child.endIndex,
+        length: text.length,
+      });
+    }
+  }
+
+  // If we got nothing (e.g. empty file, parse error), fall back
+  if (chunks.length === 0) {
+    return chunkDocument(code, config);
+  }
+
+  return {
+    chunks,
+    metadatas,
+    totalOriginalLength: code.length,
+    chunkCount: chunks.length,
+  };
+}
+```
+
+### smartChunk (chunker.ts:464-491)
+
+```typescript
+export function smartChunk(text: string, embedderModel?: string): ChunkResult {
+  const limit = embedderModel ? EMBEDDING_CONTEXT_LIMITS[embedderModel] : undefined;
+  const base = limit ?? 8192;
+
+  const cjkHeavy = getCjkRatio(text) > CJK_RATIO_THRESHOLD;
+  const divisor = cjkHeavy ? CJK_CHAR_TOKEN_DIVISOR : 1;
+
+  const config: ChunkerConfig = {
+    maxChunkSize: Math.max(200, Math.floor(base * 0.7 / divisor)),
+    overlapSize: Math.max(0, Math.floor(base * 0.05 / divisor)),
+    minChunkSize: Math.max(100, Math.floor(base * 0.1 / divisor)),
+    semanticSplit: true,
+    maxLinesPerChunk: 50,
+    astAwareCodeSplit: true,
+  };
+
+  // AST-aware code path: detect language and use tree-sitter if available
+  if (config.astAwareCodeSplit !== false) {
+    const lang = detectCodeLanguage(text);
+    if (lang !== null) {
+      return astChunk(text, lang, config);
+    }
+  }
+
+  return chunkDocument(text, config);
+}
+```
+
+### chunkDocument (chunker.ts:395-456，現有原始實作)
+
+```typescript
+export function chunkDocument(text: string, config: ChunkerConfig = DEFAULT_CHUNKER_CONFIG): ChunkResult {
+  if (!text || text.trim().length === 0) {
+    return { chunks: [], metadatas: [], totalOriginalLength: 0, chunkCount: 0 };
+  }
+
+  const totalOriginalLength = text.length;
+  const chunks: string[] = [];
+  const metadatas: ChunkMetadata[] = [];
+
+  let pos = 0;
+  const maxGuard = Math.max(4, Math.ceil(text.length / Math.max(1, config.maxChunkSize - config.overlapSize)) + 5);
+  let guard = 0;
+
+  while (pos < text.length && guard < maxGuard) {
+    guard++;
+
+    const remaining = text.length - pos;
+    if (remaining <= config.maxChunkSize) {
+      const { chunk, meta } = sliceTrimWithIndices(text, pos, text.length);
+      if (chunk.length > 0) {
+        chunks.push(chunk);
+        metadatas.push(meta);
+      }
+      break;
+    }
+
+    const maxEnd = Math.min(pos + config.maxChunkSize, text.length);
+    const minEnd = Math.min(pos + config.minChunkSize, maxEnd);
+
+    const end = findSplitEnd(text, pos, maxEnd, minEnd, config);
+    const { chunk, meta } = sliceTrimWithIndices(text, pos, end);
+
+    // If trimming made it too small, fall back to a hard split.
+    if (chunk.length < config.minChunkSize) {
+      const hardEnd = Math.min(pos + config.maxChunkSize, text.length);
+      const hard = sliceTrimWithIndices(text, pos, hardEnd);
+      if (hard.chunk.length > 0) {
+        chunks.push(hard.chunk);
+        metadatas.push(hard.meta);
+      }
+      if (hardEnd >= text.length) break;
+      pos = Math.max(hardEnd - config.overlapSize, pos + 1);
+      continue;
+    }
+
+    chunks.push(chunk);
+    metadatas.push(meta);
+
+    if (end >= text.length) break;
+
+    const nextPos = Math.max(end - config.overlapSize, pos + 1);
+    pos = nextPos;
+  }
+
+  return {
+    chunks,
+    metadatas,
+    totalOriginalLength,
+    chunkCount: chunks.length,
+  };
+}
+```
+
+---
+
+## 審查問題
+
+### Q1: 邏輯正確性
+
+**Q1a.** `smartChunk` 的 `if (config.astAwareCodeSplit !== false)` 這個判斷：
+- `config.astAwareCodeSplit` 從建構式設為 `true`
+- 所以無論是 `true` 還是 `undefined`，都會走 `astChunk` path
+- 這是否合理？若 User 刻意傳 `astAwareCodeSplit: false` 會繞過 AST 嗎？
+
+**Q1b.** `subChunk` 目前是 `return chunkDocument(text, config)`。但 `astChunk` 的 oversized declaration 分支（364-375行）直接 push text，不呼叫 `subChunk`。`subChunk` 這個 function 是否多餘？Phase 1 文件說 subChunk 是 Phase 2 才需要實作，這樣設計是否正確？
+
+**Q1c.** `for (const child of root.children)` — tree-sitter 的 `root.children` 包含所有直接子節點，包括 named 和 non-named（whitespace、punctuation）。`if (!child.type || child.type === 'ERROR')` 會 skip 掉沒有 type 的 nodes。但 non-named punctuation nodes 有 `type`（如 `","`, `";"`），它們不是 declaration，會被 `isDeclarationNode` skip。這樣是否安全？會有漏網之魚嗎？
+
+**Q1d.** `code.slice(child.startIndex, child.endIndex)` — tree-sitter 的 index 是 byte offset 還是 UTF-16 code unit？在 Node.js 的 TypeScript 環境，string indexing 用 UTF-16 code unit。這對非 ASCII（中文、emoji）字元是否會造成偏移錯誤？
+
+### Q2: Edge Cases
+
+**Q2a.** 如果 input JS file 同時包含 declaration 和純文字/HTML，declarations 被 `astChunk` 處理成 chunks，但那些 non-declaration content（comment、HTML）會消失嗎？`root.children` 只遍歷 top-level，nested content（如 function body 內的 HTML template string）應該不會消失。但如果 file 有 module-level comments 或 plain text，會被 skip 掉嗎？
+
+**Q2b.** `detectCodeLanguage` 只看前 400 字元。如果 code file 前 400 字元恰好是：大量 CSS/HTML template 字面量（含有 `{` 但沒有 JS keywords），`detectCodeLanguage` 會怎麼判斷？CSS 中有 `property: value`（`:`），可能被 TypeScript pattern 的 `:\s*string` 誤判？
+
+**Q2c.** `tree-sitter-javascript` parse TypeScript 語法的極限：
+- `interface UserProfile { id: string; }` → tree-sitter-javascript 解析時會產生什麼 node？測試顯示 ERROR node + statement_block（body）。
+- 這是否代表 TypeScript `interface` 走 `astChunk` 時會被當成「不是 declaration」（被 ERROR skip 掉）？
+
+### Q3: Phase 1 設計 vs 實作
+
+Phase 1 文件描述：
+> - Oversized declaration: subChunk() → chunkDocument() with smart limit
+
+但 `astChunk` 的 oversized branch（364-375）直接 `chunks.push(text)`，不呼叫 `subChunk`。Phase 1 文件的「Oversized declaration → subChunk」的設計是否沒有被實作？
+
+### Q4: 測試覆蓋
+
+`test/ast-code-chunking.test.mjs` 已有 20 個測試（19/20 通過，1 個 TS interface 測試改為走 `smartChunk` 而非直接 `astChunk`）。
+
+**缺口：**
+1. `root.children` 包含非 declaration nodes 的實際行為（已由 code review 覆蓋）
+2. `detectCodeLanguage` 對 comment-heavy 前 400 字元的 code file 的行為
+3. TypeScript-only 語法走 `tree-sitter-javascript` parser 的實際後果（已由 debug 確認：interface → ERROR + statement_block）
+4. 非 ASCII 字元的 `code.slice()` 偏移問題
+
+### Q5: `ChargerConfig` 介面
+
+`ChargerConfig` 介面是否已更新？`astAwareCodeSplit?: boolean` 是否已加入介面？
+
+---
+
+## 請直接回答
+
+1. Q1a-Q1d 的邏輯正確性（每題直接說「正確」或「有問題 + 具體原因 + 修復建議」）
+2. Q2a-Q2c 的 Edge case 分析（哪些是實質風險？哪些可以接受？）
+3. Q3 的 Phase 1 設計缺口是否需要現在修？（subChunk oversized declaration）
+4. Q4 缺口是否有實質風險
+5. Q5: `ChargerConfig` 介面是否需要更新？
+
+不要只說「有潛在風險」，請明確說「沒問題」或「有問題，原因是 X，建議 Y」。

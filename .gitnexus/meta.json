@@ -1,0 +1,17 @@
+{
+  "repoPath": "/home/jlin53882/tast/memory-lancedb-pro",
+  "remoteUrl": "https://github.com/CortexReach/memory-lancedb-pro",
+  "lastCommit": "e68cef74590ea3ba713122c3712b52dacd906cc5",
+  "indexedAt": "2026-05-04T11:21:24.719214+08:00",
+  "stats": {
+    "files": 169,
+    "nodes": 6312,
+    "edges": 10984,
+    "communities": 102,
+    "processes": 300,
+    "embeddings": 5059,
+    "embeddingModel": "jina-v5-retrieval-test",
+    "embeddingDims": 1024,
+    "embeddingUrl": "http://172.31.224.1:11434/v1"
+  }
+}
