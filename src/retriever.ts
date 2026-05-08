@@ -1618,6 +1618,9 @@ export class MemoryRetriever {
       return v?.length ? Array.from(v as Iterable<number>) : null;
     });
 
+    // 【P2 修復】建立 id→index Map，O(1) 查詢取代 O(n) findIndex
+    const idToIdx = new Map(results.map((r, i) => [r.entry.id, i]));
+
     const selected: RetrievalResult[] = [];
     const deferred: RetrievalResult[] = [];
 
@@ -1630,8 +1633,8 @@ export class MemoryRetriever {
       }
 
       // Check if this candidate is too similar to any already-selected result
-      const tooSimilar = selected.some((s, si) => {
-        const sVec = vectors[results.findIndex(r => r.entry.id === s.entry.id)];
+      const tooSimilar = selected.some((s) => {
+        const sVec = vectors[idToIdx.get(s.entry.id) ?? -1];
         if (!sVec) return false;
         const sim = cosineSimilarity(sVec, cVec);
         return sim > similarityThreshold;
