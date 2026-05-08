@@ -174,8 +174,13 @@ function tryParseNumber(value: unknown): number {
   if (typeof value === 'number') return value;
   if (typeof value === 'string') {
     const parsed = Number(value);
-    if (Number.isNaN(parsed)) return 0;
-    return Number.isSafeInteger(parsed) ? parsed : 0;
+    // [MR1-fix] Use isFinite (same as safeToNumber) to preserve valid decimals like 0.7.
+    // Only degrade to 0 for NaN/Infinity. The bigint branch above handles unsafe
+    // BigInt gracefully (return 0 instead of throw) to prevent recovery loop abort.
+    if (!Number.isFinite(parsed)) {
+      return 0;
+    }
+    return parsed;
   }
   return 0;
 }
@@ -819,8 +824,9 @@ export class MemoryStore {
                     vector,
                     category: originalRow.category as MemoryEntry["category"],
                     scope: (originalRow.scope as string | undefined) ?? "global",
-                    importance: safeToNumber(originalRow.importance),
-                    timestamp: safeToNumber(originalRow.timestamp),
+                    // [MR1-fix] tryParseNumber (graceful) instead of safeToNumber (throw on unsafe BigInt)
+                    importance: tryParseNumber(originalRow.importance),
+                    timestamp: tryParseNumber(originalRow.timestamp),
                     metadata: (originalRow.metadata as string) || "{}",
                   };
                   await this.table!.add([originalEntry]);
@@ -1146,8 +1152,9 @@ export class MemoryStore {
                       : (() => { throw new Error(`bulkUpdateMetadataWithPatch: restore: original row.vector is null for id=${originalRow.id}`); })(),
                     category: originalRow.category as MemoryEntry["category"],
                     scope: (originalRow.scope as string | undefined) ?? "global",
-                    importance: safeToNumber(originalRow.importance),
-                    timestamp: safeToNumber(originalRow.timestamp),
+                    // [MR1-fix] tryParseNumber (graceful) instead of safeToNumber (throw on unsafe BigInt)
+                    importance: tryParseNumber(originalRow.importance),
+                    timestamp: tryParseNumber(originalRow.timestamp),
                     metadata: (originalRow.metadata as string) || "{}",
                   };
                   await this.table!.add([originalEntry]);
