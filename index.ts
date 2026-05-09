@@ -72,6 +72,12 @@ import {
   toLifecycleMemory,
 } from "./src/smart-metadata.js";
 import {
+  computeTier1Patch,
+  isSuppressed as isTier1Suppressed,
+  TIER1_DEFAULT_BAD_RECALL_DECAY_MS,
+  TIER1_DEFAULT_SUPPRESSION_DURATION_MS,
+} from "./src/auto-recall-tier1.js";
+import {
   filterUserMdExclusiveRecallResults,
   isUserMdExclusiveMemory,
   type WorkspaceBoundaryConfig,
@@ -107,6 +113,12 @@ interface PluginConfig {
   autoRecall?: boolean;
   autoRecallMinLength?: number;
   autoRecallMinRepeated?: number;
+  /** If a memory's last auto-recall injection was more than this many ms ago,
+   *  its bad_recall_count is reset to 0 on the next injection. 0 disables decay. Default: 86400000 (24h). */
+  autoRecallBadRecallDecayMs?: number;
+  /** When bad_recall_count reaches the suppression threshold, the memory is
+   *  suppressed from auto-recall for this many ms from now. Default: 1800000 (30min). */
+  autoRecallSuppressionDurationMs?: number;
   autoRecallTimeoutMs?: number;
   autoRecallMaxItems?: number;
   autoRecallMaxChars?: number;
@@ -327,6 +339,22 @@ function parsePositiveInt(value: unknown): number | undefined {
   return undefined;
 }
 
+// Like parsePositiveInt but allows 0. Used for fields where 0 is a meaningful
+// "disabled" sentinel (e.g. autoRecallBadRecallDecayMs=0 disables decay).
+function parseNonNegativeInt(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+    return Math.floor(value);
+  }
+  if (typeof value === "string") {
+    const s = value.trim();
+    if (!s) return undefined;
+    const resolved = resolveEnvVars(s);
+    const n = Number(resolved);
+    if (Number.isFinite(n) && n >= 0) return Math.floor(n);
+  }
+  return undefined;
+}
+
 function clampInt(value: number, min: number, max: number): number {
   if (!Number.isFinite(value)) return min;
   return Math.min(max, Math.max(min, Math.floor(value)));
@@ -452,6 +480,9 @@ const DEFAULT_REFLECTION_SESSION_TTL_MS = 30 * 60 * 1000;
 const DEFAULT_REFLECTION_MAX_TRACKED_SESSIONS = 200;
 const DEFAULT_REFLECTION_ERROR_SCAN_MAX_CHARS = 8_000;
 const DEFAULT_SERIAL_GUARD_COOLDOWN_MS = 120_000;
+// After /new or /reset, the just-closed session may have generated fresh
+// derived deltas. Keep those out of the immediately opened prompt window.
+const DEFAULT_REFLECTION_BOUNDARY_DERIVED_SUPPRESSION_MS = 120_000;
 const REFLECTION_FALLBACK_MARKER = "(fallback) Reflection generation failed; storing minimal pointer only.";
 const DIAG_BUILD_TAG = "memory-lancedb-pro-diag-20260308-0058";
 
@@ -469,6 +500,12 @@ type ReflectionErrorState = {
   lastInjectedCount: number;
   signatureSet: Set<string>;
   updatedAt: number;
+};
+
+type ReflectionDerivedSuppressionState = {
+  updatedAt: number;
+  until: number;
+  reason: string;
 };
 
 type EmbeddedPiRunner = (params: Record<string, unknown>) => Promise<unknown>;
@@ -831,6 +868,25 @@ function splitProviderModel(modelRef: string): { provider?: string; model?: stri
     return { provider: provider || undefined, model: model || undefined };
   }
   return { model: s };
+}
+
+
+/**
+ * When modelRef is a bare name (no / prefix), infer provider from baseURL.
+ * Use "." + suffix to prevent fake-minimax.io subdomain spoofing.
+ */
+export function inferProviderFromBaseURL(baseURL: string | undefined): string | undefined {
+  if (!baseURL) return undefined;
+  try {
+    const url = new URL(baseURL);
+    const hostname = url.hostname.toLowerCase();
+    if (hostname.endsWith(".minimax.io")) return "minimax-portal";
+    if (hostname.endsWith(".openai.com")) return "openai";
+    if (hostname.endsWith(".anthropic.com")) return "anthropic";
+    return undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function asNonEmptyString(value: unknown): string | undefined {
@@ -1295,8 +1351,21 @@ async function generateReflectionText(params: {
       onLog: onRetryLog,
       execute: async () => {
         const runEmbeddedPiAgent = await loadEmbeddedPiRunner(params.api);
-        const modelRef = resolveAgentPrimaryModelRef(params.cfg, params.agentId);
-        const { provider, model } = modelRef ? splitProviderModel(modelRef) : {};
+        const cfg = params.cfg as Record<string, unknown>;
+        const llmConfig = cfg?.llm as Record<string, unknown> | undefined;
+        const modelRefFromConfig = llmConfig?.model;
+
+        // Model resolution chain: agent-specific primary model ref > global llm.model fallback.
+        // The typeof guard ensures a non-string value (e.g. number) does not reach splitProviderModel as-is.
+        const modelRef =
+          (resolveAgentPrimaryModelRef(params.cfg, params.agentId) as string | undefined)
+          ?? (typeof modelRefFromConfig === "string" ? modelRefFromConfig : undefined);
+
+        // Provider resolution chain: parsed from modelRef (e.g. "minimax/MiniMax-M2.7") > inferred from baseURL.
+        // inferProviderFromBaseURL uses .endsWith(".suffix") to prevent subdomain spoofing.
+        const split = modelRef ? splitProviderModel(modelRef) : { provider: undefined, model: undefined };
+        const provider = split.provider ?? inferProviderFromBaseURL(llmConfig?.baseURL as string | undefined);
+        const model = split.model;
         const embeddedTimeoutMs = Math.max(params.timeoutMs + 5000, 15000);
 
         return await withTimeout(
@@ -1761,6 +1830,21 @@ const pluginVersion = getPluginVersion();
 // hook/tool registration for the new API instance" regression that rwmjhb identified.
 let _registeredApis = new WeakSet<OpenClawPluginApi>();
 
+// Dual-track registration: alongside WeakSet (GC-safe), use a Map for explicit
+// rollback tracking and test inspection. WeakSet handles GC safety; Map provides
+// manual clearability and _getRegisteredApisForTest() export.
+// Track: _registeredApisMap (explicit claim/rollback) + _registeredApis (WeakSet guard)
+let _registeredApisMap = new Map<OpenClawPluginApi, boolean>();
+
+/**
+ * Returns the internal registration Map — for unit test inspection only.
+ * Do NOT mutate from outside the plugin.
+ * @public (test API)
+ */
+export function _getRegisteredApisForTest(): Map<OpenClawPluginApi, boolean> {
+  return _registeredApisMap;
+}
+
 // ============================================================================
 // Hook Event Deduplication (Phase 1)
 // ============================================================================
@@ -1800,6 +1884,18 @@ function _dedupHookEvent(handlerName: string, event: any): boolean {
   return false; // first occurrence — proceed
 }
 
+function getCommandActionName(action: unknown): string {
+  if (typeof action !== "string") return "";
+  const normalized = action.trim().toLowerCase();
+  if (!normalized) return "";
+  return normalized.split(":").pop() || normalized;
+}
+
+function isSessionBoundaryReflectionAction(action: unknown): boolean {
+  const name = getCommandActionName(action);
+  return name === "new" || name === "reset";
+}
+
 // ============================================================================
 // Phase 2 — Singleton State Management (PR #598)
 // ============================================================================
@@ -1819,6 +1915,7 @@ interface PluginSingletonState {
   // Session Maps — persist across scope refreshes instead of being recreated
   reflectionErrorStateBySession: Map<string, ReflectionErrorState>;
   reflectionDerivedBySession: Map<string, { updatedAt: number; derived: string[] }>;
+  reflectionDerivedSuppressionBySession: Map<string, ReflectionDerivedSuppressionState>;
   reflectionByAgentCache: Map<string, { updatedAt: number; invariants: string[]; derived: string[] }>;
   recallHistory: Map<string, Map<string, number>>;
   turnCounter: Map<string, number>;
@@ -1957,6 +2054,7 @@ function _initPluginState(api: OpenClawPluginApi): PluginSingletonState {
   // Session Maps — MUST be in singleton state so they persist across scope refreshes
   const reflectionErrorStateBySession = new Map<string, ReflectionErrorState>();
   const reflectionDerivedBySession = new Map<string, { updatedAt: number; derived: string[] }>();
+  const reflectionDerivedSuppressionBySession = new Map<string, ReflectionDerivedSuppressionState>();
   const reflectionByAgentCache = new Map<string, { updatedAt: number; invariants: string[]; derived: string[] }>();
   const recallHistory = new Map<string, Map<string, number>>();
   const turnCounter = new Map<string, number>();
@@ -1985,6 +2083,7 @@ function _initPluginState(api: OpenClawPluginApi): PluginSingletonState {
     extractionRateLimiter,
     reflectionErrorStateBySession,
     reflectionDerivedBySession,
+    reflectionDerivedSuppressionBySession,
     reflectionByAgentCache,
     recallHistory,
     turnCounter,
@@ -2050,21 +2149,24 @@ const memoryLanceDBProPlugin = {
     //   - Memory heap growth from repeated resource creation (~9 calls/process)
     //   - Accumulated session Maps being lost on re-registration
     //
-    // IMPORTANT: _registeredApis.add(api) is called AFTER successful init.
-    // This ensures that if _initPluginState throws, the api is NOT in the
-    // WeakSet, allowing a subsequent register() call with the same api to retry.
-    // (The old placement — before init — caused permanent breakage on init failure.)
+    // Dual-track claim: we record registration BEFORE attempting init so that
+    // if init fails, we can explicitly roll back the Map entry — enabling a
+    // subsequent register() retry with the same API object.
+    //   - _registeredApis (WeakSet): GC-safe singleton guard (Phase 2 guard)
+    //   - _registeredApisMap (Map): explicit claim/rollback for test inspection
     // ========================================================================
+    _registeredApis.add(api);    // claim before init (Phase 2 singleton guard)
+    _registeredApisMap.set(api, true);  // dual-track: explicit claim for rollback
     let singleton: typeof _singletonState;
     try {
       if (!_singletonState) { _singletonState = _initPluginState(api); }
       singleton = _singletonState;
     } catch (err) {
       api.logger.error(`memory-lancedb-pro: _initPluginState failed — ${String(err)}`);
+      _registeredApis.delete(api);         // dual-track rollback: WeakSet un-claim
+      _registeredApisMap.delete(api);     // dual-track rollback: Map un-claim
       throw err;
     }
-    _registeredApis.add(api);
-
     const {
       config,
       resolvedDbPath,
@@ -2079,6 +2181,7 @@ const memoryLanceDBProPlugin = {
       extractionRateLimiter,
       reflectionErrorStateBySession,
       reflectionDerivedBySession,
+      reflectionDerivedSuppressionBySession,
       reflectionByAgentCache,
       recallHistory,
       turnCounter,
@@ -2213,8 +2316,14 @@ const memoryLanceDBProPlugin = {
           reflectionDerivedBySession.delete(key);
         }
       }
+      for (const [key, state] of reflectionDerivedSuppressionBySession.entries()) {
+        if (now > state.until || now - state.updatedAt > DEFAULT_REFLECTION_SESSION_TTL_MS) {
+          reflectionDerivedSuppressionBySession.delete(key);
+        }
+      }
       pruneOldestByUpdatedAt(reflectionErrorStateBySession, DEFAULT_REFLECTION_MAX_TRACKED_SESSIONS);
       pruneOldestByUpdatedAt(reflectionDerivedBySession, DEFAULT_REFLECTION_MAX_TRACKED_SESSIONS);
+      pruneOldestByUpdatedAt(reflectionDerivedSuppressionBySession, DEFAULT_REFLECTION_MAX_TRACKED_SESSIONS);
     };
 
     const getReflectionErrorState = (sessionKey: string): ReflectionErrorState => {
@@ -2694,7 +2803,7 @@ const memoryLanceDBProPlugin = {
               api.logger.debug(`memory-lancedb-pro: governance: filtered id=${r.entry.id} reason=layer(${meta.memory_layer}) score=${r.score?.toFixed(3)} text=${r.entry.text.slice(0, 50)}`);
               return false;
             }
-            if (meta.suppressed_until_turn > 0 && currentTurn <= meta.suppressed_until_turn) {
+            if (isTier1Suppressed(meta, Date.now())) {
               suppressedFilteredCount++;
               return false;
             }
@@ -2818,33 +2927,22 @@ const memoryLanceDBProPlugin = {
           }
 
           const injectedAt = Date.now();
+          const tier1PatchOpts = {
+            injectedAt,
+            badRecallDecayMs:
+              config.autoRecallBadRecallDecayMs ?? TIER1_DEFAULT_BAD_RECALL_DECAY_MS,
+            suppressionDurationMs:
+              config.autoRecallSuppressionDurationMs ?? TIER1_DEFAULT_SUPPRESSION_DURATION_MS,
+            minRepeated,
+          };
           await Promise.allSettled(
-            selected.map(async (item) => {
-              const meta = item.meta;
-              const staleInjected =
-                typeof meta.last_injected_at === "number" &&
-                meta.last_injected_at > 0 &&
-                (
-                  typeof meta.last_confirmed_use_at !== "number" ||
-                  meta.last_confirmed_use_at < meta.last_injected_at
-                );
-              const nextBadRecallCount = staleInjected
-                ? meta.bad_recall_count + 1
-                : meta.bad_recall_count;
-              const shouldSuppress = nextBadRecallCount >= 3 && minRepeated > 0;
-              await store.patchMetadata(
+            selected.map(async (item) =>
+              store.patchMetadata(
                 item.id,
-                {
-                  injected_count: meta.injected_count + 1,
-                  last_injected_at: injectedAt,
-                  bad_recall_count: nextBadRecallCount,
-                  suppressed_until_turn: shouldSuppress
-                    ? Math.max(meta.suppressed_until_turn, currentTurn + minRepeated)
-                    : meta.suppressed_until_turn,
-                },
+                computeTier1Patch(item.meta, tier1PatchOpts),
                 accessibleScopes,
-              );
-            }),
+              ),
+            ),
           );
 
           const memoryContext = selected.map((item) => item.line).join("\n");
@@ -3199,8 +3297,13 @@ const memoryLanceDBProPlugin = {
             `memory-lancedb-pro: regex fallback found ${toCapture.length} capturable text(s) for agent ${agentId}`,
           );
 
-          // Store each capturable piece (limit to 2 per conversation)
-          let stored = 0;
+          // FIX #675: Collect entries and use bulkStore() once (1 lock instead of N).
+          // Limit to 2 capturable pieces per conversation.
+          const capturedEntries: Array<{
+            text: string; vector: number[]; importance: number;
+            category: string; scope: string; metadata: string;
+          }> = [];
+
           for (const text of toCapture.slice(0, 2)) {
             if (isUserMdExclusiveMemory({ text }, config.workspaceBoundary)) {
               api.logger.info(
@@ -3229,13 +3332,34 @@ const memoryLanceDBProPlugin = {
               continue;
             }
 
-            await store.store({
-              text,
-              vector,
-              importance: 0.7,
-              category,
-              scope: defaultScope,
-              metadata: stringifySmartMetadata(
+            // FIX Bug #3 + P1: batch-internal dedup — skip texts whose vector is too similar
+            // to an entry already in capturedEntries.  Uses cosine similarity (not raw dot product)
+            // to be consistent with the DB dedup path which uses vectorSearch().score.
+            let duplicateInBatch = false;
+            for (const prev of capturedEntries) {
+              if (prev.vector.length !== vector.length) continue;
+              let dot = 0;
+              for (let i = 0; i < vector.length; i++) dot += prev.vector[i] * vector[i];
+              // Cosine similarity = dot / (||prev|| * ||vector||); skip if > 0.90.
+              // If either norm is 0 (zero-vector from embedder), cosine falls back to
+              // raw dot (not cosine similarity) — entry will be written (fail-open).
+              const normPrev = Math.sqrt(prev.vector.reduce((s, v) => s + v * v, 0));
+              const normVec = Math.sqrt(vector.reduce((s, v) => s + v * v, 0));
+              const cosine = normPrev > 0 && normVec > 0 ? dot / (normPrev * normVec) : dot;
+              if (cosine > 0.90) { duplicateInBatch = true; break; }
+            }
+            if (duplicateInBatch) {
+              api.logger.info(
+                `memory-lancedb-pro: skipped duplicate-in-batch text for agent ${agentId}: "${text.slice(0, 40)}"`,
+              );
+              continue;
+            }
+
+            // Build metadata; if it fails, skip this entry rather than propagating
+            // the exception and leaving capturedEntries in a partial state.
+            let metadata: string;
+            try {
+              metadata = stringifySmartMetadata(
                 buildSmartMetadata(
                   {
                     text,
@@ -3259,23 +3383,76 @@ const memoryLanceDBProPlugin = {
                     suppressed_until_turn: 0,
                   },
                 ),
-              ),
-            });
-            stored++;
-
-            // Dual-write to Markdown mirror if enabled
-            if (mdMirror) {
-              await mdMirror(
-                { text, category, scope: defaultScope, timestamp: Date.now() },
-                { source: "auto-capture", agentId },
               );
+            } catch (metadataErr) {
+              api.logger.warn(
+                `memory-lancedb-pro: skipped entry whose metadata construction failed: "${text.slice(0, 40)}": ${String(metadataErr)}`,
+              );
+              continue;
             }
+
+            capturedEntries.push({
+              text,
+              vector,
+              importance: 0.7,
+              category,
+              scope: defaultScope,
+              metadata,
+            });
           }
 
-          if (stored > 0) {
-            api.logger.info(
-              `memory-lancedb-pro: auto-captured ${stored} memories for agent ${agentId} in scope ${defaultScope}`,
-            );
+          // FIX #675: bulkStore once (1 lock for N entries) instead of N store.store() calls (N locks).
+          // FIX #Bug-1 (post-Codex-review): mdMirror errors are handled separately and do NOT
+          // trigger the store.store() fallback (which would create duplicate rows).
+          if (capturedEntries.length > 0) {
+            try {
+              await store.bulkStore(capturedEntries);
+              api.logger.info(
+                `memory-lancedb-pro: auto-captured ${capturedEntries.length} memories for agent ${agentId} in scope ${defaultScope} (bulkStore)`,
+              );
+            } catch (err) {
+              api.logger.warn(
+                `memory-lancedb-pro: bulkStore failed for ${capturedEntries.length} entries, falling back to individual store: ${String(err)}`,
+              );
+              // Fallback: store individually, with DB dedup pre-check restored.
+              // Re-check DB dedup in fallback to catch similar entries written by
+              // concurrent requests between the initial check and bulkStore failure.
+              for (const entry of capturedEntries) {
+                let existing: Awaited<ReturnType<typeof store.vectorSearch>> = [];
+                try {
+                  existing = await store.vectorSearch(entry.vector, 1, 0.1, [entry.scope]);
+                } catch { /* fail-open */ }
+                if (existing.length > 0 && existing[0].score > 0.90) {
+                  api.logger.info(
+                    `memory-lancedb-pro: fallback dedup skipped "${entry.text.slice(0, 40)}"`,
+                  );
+                  continue;
+                }
+                await store.store(entry);
+              }
+              api.logger.info(
+                `memory-lancedb-pro: auto-captured ${capturedEntries.length} memories for agent ${agentId} (individual fallback)`,
+              );
+            }
+
+            // FIX #Bug-1: mdMirror is called AFTER bulkStore succeeds, with its own
+            // error handling. If mdMirror fails, bulkStore is ALREADY committed —
+            // we log the error and continue. We do NOT retry via store.store()
+            // (which would create duplicate rows in LanceDB).
+            if (mdMirror) {
+              for (const entry of capturedEntries) {
+                try {
+                  await mdMirror(
+                    { text: entry.text, category: entry.category, scope: entry.scope, timestamp: Date.now() },
+                    { source: "auto-capture", agentId },
+                  );
+                } catch (mdErr) {
+                  api.logger.warn(
+                    `memory-lancedb-pro: mdMirror failed for entry "${entry.text.slice(0, 40)}…", bulkStore already committed: ${String(mdErr)}`,
+                  );
+                }
+              }
+            }
           }
         } catch (err) {
           api.logger.warn(`memory-lancedb-pro: capture failed: ${String(err)}`);
@@ -3577,6 +3754,15 @@ const memoryLanceDBProPlugin = {
         if (!sessionKey) return;
         pruneReflectionSessionState();
 
+        if (event.toolName === "exec") {
+          const resultTextRaw = extractTextFromToolResult(event.result);
+          const exitCodeMatch = resultTextRaw.match(
+            /(?:\bexit(?:\s+code)?|Command\s+exited)\s*[;:\s](\d+)\b/i
+          );
+          const actualExitCode = exitCodeMatch ? parseInt(exitCodeMatch[1], 10) : -1;
+          if (actualExitCode === 0) { return; }
+        }
+
         if (typeof event.error === "string" && event.error.trim().length > 0) {
           const signature = normalizeErrorSignature(event.error);
           addReflectionErrorSignal(sessionKey, {
@@ -3658,20 +3844,29 @@ const memoryLanceDBProPlugin = {
         const blocks: string[] = [];
         if (reflectionInjectMode === "inheritance+derived") {
           try {
-            const scopes = resolveScopeFilter(scopeManager, agentId);
-            const derivedCache = sessionKey ? reflectionDerivedBySession.get(sessionKey) : null;
-            const derivedLines = derivedCache?.derived?.length
-              ? derivedCache.derived
-              : (await loadAgentReflectionSlices(agentId, scopes)).derived;
-            if (derivedLines.length > 0) {
-              blocks.push(
-                [
-                  "<derived-focus>",
-                  "Weighted recent derived execution deltas from reflection memory:",
-                  ...derivedLines.slice(0, 6).map((line, i) => `${i + 1}. ${line}`),
-                  "</derived-focus>",
-                ].join("\n")
+            const now = Date.now();
+            const suppression = sessionKey ? reflectionDerivedSuppressionBySession.get(sessionKey) : undefined;
+            if (suppression && suppression.until > now) {
+              api.logger.debug?.(
+                `memory-reflection: derived injection suppressed after ${suppression.reason} for sessionKey=${sessionKey}`,
               );
+            } else {
+              if (suppression) reflectionDerivedSuppressionBySession.delete(sessionKey);
+              const scopes = resolveScopeFilter(scopeManager, agentId);
+              const derivedCache = sessionKey ? reflectionDerivedBySession.get(sessionKey) : null;
+              const derivedLines = derivedCache?.derived?.length
+                ? derivedCache.derived
+                : (await loadAgentReflectionSlices(agentId, scopes)).derived;
+              if (derivedLines.length > 0) {
+                blocks.push(
+                  [
+                    "<derived-focus>",
+                    "Weighted recent derived execution deltas from reflection memory:",
+                    ...derivedLines.slice(0, 6).map((line, i) => `${i + 1}. ${line}`),
+                    "</derived-focus>",
+                  ].join("\n")
+                );
+              }
             }
           } catch (err) {
             api.logger.warn(`memory-reflection: derived injection failed: ${String(err)}`);
@@ -3702,6 +3897,7 @@ const memoryLanceDBProPlugin = {
         if (!sessionKey) return;
         reflectionErrorStateBySession.delete(sessionKey);
         reflectionDerivedBySession.delete(sessionKey);
+        reflectionDerivedSuppressionBySession.delete(sessionKey);
         pruneReflectionSessionState();
       }, { priority: 20 });
 
@@ -3729,6 +3925,7 @@ const memoryLanceDBProPlugin = {
 
       const runMemoryReflection = async (event: any) => {
         const sessionKey = typeof event.sessionKey === "string" ? event.sessionKey : "";
+        const action = String(event?.action || "unknown");
 
         // Validate sessionKey BEFORE dedup — invalid/empty keys must NOT pollute the dedup set
         if (!sessionKey) {
@@ -3737,6 +3934,15 @@ const memoryLanceDBProPlugin = {
         }
 
         if (_dedupHookEvent("reflection", event)) return;
+        if (isSessionBoundaryReflectionAction(action)) {
+          const now = Date.now();
+          reflectionDerivedBySession.delete(sessionKey);
+          reflectionDerivedSuppressionBySession.set(sessionKey, {
+            updatedAt: now,
+            until: now + DEFAULT_REFLECTION_BOUNDARY_DERIVED_SUPPRESSION_MS,
+            reason: action,
+          });
+        }
         // Guard against re-entrant calls for the same session (e.g. file-write triggering another command:new)
         // Uses global lock shared across all plugin instances to prevent loop amplification.
         const globalLock = getGlobalReflectionLock();
@@ -3763,7 +3969,6 @@ const memoryLanceDBProPlugin = {
         let reflectionRan = false;
         try {
           pruneReflectionSessionState();
-          const action = String(event?.action || "unknown");
           const workspaceDir = resolveWorkspaceDirFromContext(context);
           if (!cfg) {
             api.logger.warn(`memory-reflection: command:${action} missing cfg in hook context; skip reflection`);
@@ -4043,7 +4248,7 @@ const memoryLanceDBProPlugin = {
                 store.vectorSearch(vector, limit, minScore, scopeFilter),
               store: (entry) => store.store(entry),
             });
-            if (sessionKey && stored.slices.derived.length > 0) {
+            if (sessionKey && stored.slices.derived.length > 0 && !isSessionBoundaryReflectionAction(action)) {
               reflectionDerivedBySession.set(sessionKey, {
                 updatedAt: nowTs,
                 derived: stored.slices.derived,
@@ -4066,6 +4271,15 @@ const memoryLanceDBProPlugin = {
         } finally {
           if (sessionKey) {
             reflectionErrorStateBySession.delete(sessionKey);
+            if (isSessionBoundaryReflectionAction(action)) {
+              const now = Date.now();
+              reflectionDerivedBySession.delete(sessionKey);
+              reflectionDerivedSuppressionBySession.set(sessionKey, {
+                updatedAt: now,
+                until: now + DEFAULT_REFLECTION_BOUNDARY_DERIVED_SUPPRESSION_MS,
+                reason: action,
+              });
+            }
             getGlobalReflectionLock().delete(sessionKey);
             getSerialGuardMap().set(sessionKey, Date.now());
             // NOTE: This guard is tested via inline simulation in
@@ -4476,6 +4690,10 @@ export function parsePluginConfig(value: unknown): PluginConfig {
     autoRecall: cfg.autoRecall === true,
     autoRecallMinLength: parsePositiveInt(cfg.autoRecallMinLength),
     autoRecallMinRepeated: parsePositiveInt(cfg.autoRecallMinRepeated) ?? 8,
+    // 0 is a meaningful sentinel for both Tier 1 knobs (disable decay /
+    // collapse suppression to a no-op), so use the non-negative parser.
+    autoRecallBadRecallDecayMs: parseNonNegativeInt(cfg.autoRecallBadRecallDecayMs),
+    autoRecallSuppressionDurationMs: parseNonNegativeInt(cfg.autoRecallSuppressionDurationMs),
     autoRecallMaxItems: parsePositiveInt(cfg.autoRecallMaxItems) ?? 3,
     autoRecallMaxChars: parsePositiveInt(cfg.autoRecallMaxChars) ?? 600,
     autoRecallPerItemMaxChars: parsePositiveInt(cfg.autoRecallPerItemMaxChars) ?? 180,
@@ -4697,6 +4915,7 @@ export { getDefaultMdMirrorDir };
  */
 export function resetRegistration() {
   _registeredApis = new WeakSet<OpenClawPluginApi>();
+  _registeredApisMap.clear();  // dual-track: clear Map alongside WeakSet
   _singletonState = null;
   _hookEventDedup.clear();
 }
