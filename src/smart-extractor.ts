@@ -959,19 +959,31 @@ export class SmartExtractor {
             TEMPORAL_VERSIONED_CATEGORIES.has(candidate.category) &&
             dedupResult.contextLabel === "general"
           ) {
-            await this.handleSupersede(
-              candidate,
-              vector,
-              dedupResult.matchId,
-              sessionKey,
-              targetScope,
-              scopeFilter,
-              admission?.audit,
-              createEntries,
-              invalidateEntries,
-            );
-            stats.created++;
-            stats.superseded = (stats.superseded ?? 0) + 1;
+            // MR2: same deduplication guard as the regular supersede path —
+            // if this matchId is already queued for supersession, create as
+            // a new entry instead of double-superseding.
+            if (queuedSupersedeMatchIds?.has(dedupResult.matchId)) {
+              this.log(
+                `memory-pro: smart-extractor: CONTRADICT matchId ${dedupResult.matchId.slice(0, 8)} already queued — creating as new entry`,
+              );
+              createEntries?.push(this.buildStoreEntry(candidate, vector, sessionKey, targetScope, admission?.audit));
+              stats.created++;
+            } else {
+              queuedSupersedeMatchIds?.add(dedupResult.matchId);
+              await this.handleSupersede(
+                candidate,
+                vector,
+                dedupResult.matchId,
+                sessionKey,
+                targetScope,
+                scopeFilter,
+                admission?.audit,
+                createEntries,
+                invalidateEntries,
+              );
+              stats.created++;
+              stats.superseded = (stats.superseded ?? 0) + 1;
+            }
           } else {
             await this.handleContradict(candidate, vector, dedupResult.matchId, sessionKey, targetScope, scopeFilter, dedupResult.contextLabel, admission?.audit, createEntries);
             stats.created++;
@@ -1385,8 +1397,10 @@ export class SmartExtractor {
       const invalidatedMeta = buildSmartMetadata(existing, {
         fact_key: factKey,
         invalidated_at: now,
-        valid_from: now, // Must be set so second-pass buildSmartMetadata preserves invalidated_at
-        // superseded_by: will be set in the second pass after bulkStore returns IDs
+        // NOTE: valid_from is deliberately NOT updated here — preserving the
+        // old entry's original valid_from maintains correct version-chain
+        // chronology. Only invalidated_at and superseded_by (set in the
+        // second pass) change.
       });
       invalidateEntries?.push({
         id: matchId,
@@ -1576,18 +1590,24 @@ export class SmartExtractor {
     createEntries?: StoreEntry[],
   ): Promise<void> {
     // 1. Record contradiction on the existing memory
+    // If matchId does not exist, skip contradiction entirely — do NOT create
+    // a new entry with a dangling contradicts reference.
     const existing = await this.store.getById(matchId, scopeFilter);
-    if (existing) {
-      const meta = parseSmartMetadata(existing.metadata, existing);
-      const supportInfo = parseSupportInfo(meta.support_info);
-      const updated = updateSupportStats(supportInfo, contextLabel, "contradict");
-      meta.support_info = updated;
-      await this.store.update(
-        matchId,
-        { metadata: stringifySmartMetadata(meta) },
-        scopeFilter,
+    if (!existing) {
+      this.log(
+        `memory-pro: smart-extractor: contradict target ${matchId.slice(0, 8)} not found — skipping, no entry created`,
       );
+      return;
     }
+    const meta = parseSmartMetadata(existing.metadata, existing);
+    const supportInfo = parseSupportInfo(meta.support_info);
+    const updated = updateSupportStats(supportInfo, contextLabel, "contradict");
+    meta.support_info = updated;
+    await this.store.update(
+      matchId,
+      { metadata: stringifySmartMetadata(meta) },
+      scopeFilter,
+    );
 
     // 2. Store the contradicting entry as a new memory
     const storeCategory = this.mapToStoreCategory(candidate.category);

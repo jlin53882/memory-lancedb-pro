@@ -882,6 +882,9 @@ function shouldSkipReflectionMessage(role: string, text: string): boolean {
 const AUTO_CAPTURE_MAP_MAX_ENTRIES = 2000;
 // Guard: skip texts > 5000 chars to prevent embedding API errors (issue #417 Fix #3)
 const MAX_MESSAGE_LENGTH = 5000;
+// Deduplication similarity threshold for regex-fallback auto-capture.
+// 0.90 means only very-close duplicates (>90% vector similarity) are skipped.
+const AUTO_CAPTURE_DEDUP_THRESHOLD = 0.90;
 const AUTO_CAPTURE_EXPLICIT_REMEMBER_RE =
   /^(?:请|請)?(?:记住|記住|记一下|記一下|别忘了|別忘了)[。.!?？!]*$/u;
 
@@ -3239,7 +3242,7 @@ const memoryLanceDBProPlugin = {
               );
             }
 
-            if (existing.length > 0 && existing[0].score > 0.90) {
+            if (existing.length > 0 && existing[0].score > AUTO_CAPTURE_DEDUP_THRESHOLD) {
               continue;
             }
 
