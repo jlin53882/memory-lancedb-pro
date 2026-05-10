@@ -7,7 +7,7 @@ import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { homedir, tmpdir } from "node:os";
 import { join, dirname, basename } from "node:path";
 import { readFile, readdir, writeFile, mkdir, appendFile, unlink, stat } from "node:fs/promises";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
@@ -289,10 +289,11 @@ function getDefaultDbPath(): string {
 
 function getDefaultWorkspaceDir(): string {
   const home = homedir();
-  // Try workspace-main first (standard OpenClaw layout), fallback to workspace
+  // OpenClaw 2026.4+ standard layout uses workspace-main; prefer it if present
   const mainDir = join(home, ".openclaw", "workspace-main");
   try {
-    if (readFileSync(join(mainDir, "AGENTS.md"))) return mainDir;
+    const stat = statSync(join(mainDir, "AGENTS.md"));
+    if (stat && stat.isFile()) return mainDir;
   } catch {}
   return join(home, ".openclaw", "workspace");
 }
@@ -1798,9 +1799,14 @@ function createAdmissionRejectionAuditWriter(
     return null;
   }
 
-  const filePath = api.resolvePath(
-    resolveRejectedAuditFilePath(resolvedDbPath, config.admissionControl),
-  );
+  const rawPath = resolveRejectedAuditFilePath(resolvedDbPath, config.admissionControl);
+  // Cross-platform absolute-path check: detects POSIX (/path), Windows drive
+  // letter (C:\, C:/), and UNC paths (\\server\share). Only calls api.resolvePath()
+  // for relative paths; absolute paths pass through unchanged.
+  const isAbsolute = rawPath.startsWith("/") ||
+    (process.platform === "win32" && /^[a-zA-Z]:[/\\]/.test(rawPath)) ||
+    (process.platform === "win32" && /^\\\\{2}[^\\]+\\[^\\]+/.test(rawPath));
+  const filePath = isAbsolute ? rawPath : api.resolvePath(rawPath);
 
   return async (entry: AdmissionRejectionAuditEntry) => {
     try {
@@ -4444,9 +4450,28 @@ const memoryLanceDBProPlugin = {
 
     async function runBackup() {
       try {
+        // resolvedDbPath is already absolute (produced by api.resolvePath at
+        // plugin init); wrapping it again triggers api.resolvePath(absolute-path)
+        // ??undefined in OpenClaw 2026.4.x strict mode, crashing with:
+        //   TypeError [ERR_INVALID_ARG_TYPE]: The "path" argument must be of type
+        //   string or an instance of Buffer or URL. Received undefined
+        // Guard against undefined first (api.resolvePath returns undefined for
+        // empty-string dbPath config rather than throwing).
+        if (!resolvedDbPath || typeof resolvedDbPath !== "string") {
+          api.logger.warn(
+            `memory-lancedb-pro: backup skipped — resolvedDbPath is "${String(resolvedDbPath)}"`,
+          );
+          return;
+        }
         const backupDir = api.resolvePath(
           join(resolvedDbPath, "..", "backups"),
         );
+        if (!backupDir || typeof backupDir !== "string") {
+          api.logger.warn(
+            `memory-lancedb-pro: backup skipped — backupDir resolved to "${String(backupDir)}"`,
+          );
+          return;
+        }
         await mkdir(backupDir, { recursive: true });
 
         const allMemories = await store.list(undefined, undefined, 10000, 0);
