@@ -65,6 +65,8 @@ export const CI_TEST_MANIFEST = [
   // Issue #693 extraction write validation tests
   { group: "core-regression", runner: "node", file: "test/extraction-validation.test.mjs", args: ["--test"] },
   { group: "core-regression", runner: "node", file: "test/dedup-false-alarm.test.mjs", args: ["--test"] },
+  // Issues #675 #676 batch mode implementation tests
+  { group: "core-regression", runner: "node", file: "test/pr678-pr723-batch-invalidation.test.mjs" },
 ];
 
 export function getEntriesForGroup(group) {
