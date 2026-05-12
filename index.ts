@@ -4454,6 +4454,12 @@ const memoryLanceDBProPlugin = {
           ?? process.env.OPENCLAW_HOME
           ?? join(homedir(), ".openclaw");
         const backupDir = api.resolvePath(join(openclawHome, "backups"));
+        if (!backupDir || typeof backupDir !== "string") {
+          api.logger.warn(
+            `memory-lancedb-pro: backup skipped — backupDir resolved to "${String(backupDir)}"`,
+          );
+          return;
+        }
         await mkdir(backupDir, { recursive: true });
 
         const allMemories = await store.list(undefined, undefined, 10000, 0);
