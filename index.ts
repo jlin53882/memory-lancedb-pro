@@ -26,6 +26,7 @@ import {
   getEffectiveVectorDimensions,
 } from "./src/embedder.js";
 import { createRetriever, DEFAULT_RETRIEVAL_CONFIG } from "./src/retriever.js";
+import { AccessTracker } from "./src/access-tracker.js";
 import { createScopeManager, resolveScopeFilter, isSystemBypassId, parseAgentIdFromSessionKey } from "./src/scopes.js";
 import { createMigrator } from "./src/migrate.js";
 import { registerAllMemoryTools } from "./src/tools.js";
@@ -288,6 +289,11 @@ function getDefaultDbPath(): string {
 
 function getDefaultWorkspaceDir(): string {
   const home = homedir();
+  // Try workspace-main first (standard OpenClaw layout), fallback to workspace
+  const mainDir = join(home, ".openclaw", "workspace-main");
+  try {
+    if (readFileSync(join(mainDir, "AGENTS.md"))) return mainDir;
+  } catch {}
   return join(home, ".openclaw", "workspace");
 }
 
@@ -532,7 +538,7 @@ export function reportLayer1Failure(): void {
   }
 }
 
-function isLayer1CircuitOpen(): boolean {
+export function isLayer1CircuitOpen(): boolean {
   const now = Date.now();
   const cutoff = now - LAYER1_FAILURE_WINDOW_MS;
   const recentFailures = layer1FailureTimestamps.filter((t) => t >= cutoff);
@@ -1980,6 +1986,14 @@ function _initPluginState(api: OpenClawPluginApi): PluginSingletonState {
     { ...DEFAULT_RETRIEVAL_CONFIG, ...config.retrieval },
     { decayEngine },
   );
+
+  // Wire access tracker so recall operations update access_count on memories
+  const accessTracker = new AccessTracker({
+    store,
+    logger: { warn: (...args: unknown[]) => api.logger.warn(...args), info: (...args: unknown[]) => api.logger.info(...args) },
+    debounceMs: 5000,
+  });
+  retriever.setAccessTracker(accessTracker);
   const scopeManager = createScopeManager(config.scopes);
 
   const clawteamScopes = parseClawteamScopes(process.env.CLAWTEAM_MEMORY_SCOPE);
@@ -2706,6 +2720,8 @@ const memoryLanceDBProPlugin = {
         // (embedding → rerank → lifecycle), which can silently drop messages on
         // channels like Telegram when subsequent requests hit lock timeouts.
         // See: https://github.com/CortexReach/memory-lancedb-pro/issues/253
+        let autoRecallTimedOut = false;
+        let lateAutoRecallLogged = false;
         const recallWork = async (): Promise<{ prependContext: string } | undefined> => {
           // Determine agent ID and accessible scopes
           const agentId = resolveHookAgentId(ctx?.agentId, (event as any).sessionKey);
@@ -2714,6 +2730,16 @@ const memoryLanceDBProPlugin = {
             return undefined;
           }
           const accessibleScopes = resolveScopeFilter(scopeManager, agentId);
+          const shouldDropLateAutoRecall = (stage: string): boolean => {
+            if (!autoRecallTimedOut) return false;
+            if (!lateAutoRecallLogged) {
+              lateAutoRecallLogged = true;
+              api.logger.warn?.(
+                `memory-lancedb-pro: dropping late auto-recall result after timeout at ${stage} for agent ${agentId}`,
+              );
+            }
+            return true;
+          };
 
           // Use cached raw user message for the recall query to avoid channel
           // metadata noise (e.g. Slack's Conversation info JSON with message_id,
@@ -2754,6 +2780,8 @@ const memoryLanceDBProPlugin = {
             scopeFilter: accessibleScopes,
             source: "auto-recall",
           }), config.workspaceBoundary);
+
+          if (shouldDropLateAutoRecall("post-retrieve")) return;
 
           if (results.length === 0) {
             return;
@@ -2926,6 +2954,8 @@ const memoryLanceDBProPlugin = {
             return;
           }
 
+          if (shouldDropLateAutoRecall("pre-metadata")) return;
+
           if (minRepeated > 0) {
             const sessionHistory = recallHistory.get(sessionId) || new Map<string, number>();
             for (const item of selected) {
@@ -2952,6 +2982,8 @@ const memoryLanceDBProPlugin = {
               ),
             ),
           );
+
+          if (shouldDropLateAutoRecall("pre-context")) return;
 
           const memoryContext = selected.map((item) => item.line).join("\n");
 
@@ -2996,6 +3028,7 @@ const memoryLanceDBProPlugin = {
             recallWork().then((r) => { clearTimeout(timeoutId); return r; }),
             new Promise<undefined>((resolve) => {
               timeoutId = setTimeout(() => {
+                autoRecallTimedOut = true;
                 api.logger.warn(
                   `memory-lancedb-pro: auto-recall timed out after ${AUTO_RECALL_TIMEOUT_MS}ms; skipping memory injection to avoid stalling agent startup`,
                 );
@@ -3305,8 +3338,13 @@ const memoryLanceDBProPlugin = {
             `memory-lancedb-pro: regex fallback found ${toCapture.length} capturable text(s) for agent ${agentId}`,
           );
 
-          // Store each capturable piece (limit to 2 per conversation)
-          let stored = 0;
+          // FIX #675: Collect entries and use bulkStore() once (1 lock instead of N).
+          // Limit to 2 capturable pieces per conversation.
+          const capturedEntries: Array<{
+            text: string; vector: number[]; importance: number;
+            category: string; scope: string; metadata: string;
+          }> = [];
+
           for (const text of toCapture.slice(0, 2)) {
             if (isUserMdExclusiveMemory({ text }, config.workspaceBoundary)) {
               api.logger.info(
@@ -3335,13 +3373,34 @@ const memoryLanceDBProPlugin = {
               continue;
             }
 
-            await store.store({
-              text,
-              vector,
-              importance: 0.7,
-              category,
-              scope: defaultScope,
-              metadata: stringifySmartMetadata(
+            // FIX Bug #3 + P1: batch-internal dedup — skip texts whose vector is too similar
+            // to an entry already in capturedEntries.  Uses cosine similarity (not raw dot product)
+            // to be consistent with the DB dedup path which uses vectorSearch().score.
+            let duplicateInBatch = false;
+            for (const prev of capturedEntries) {
+              if (prev.vector.length !== vector.length) continue;
+              let dot = 0;
+              for (let i = 0; i < vector.length; i++) dot += prev.vector[i] * vector[i];
+              // Cosine similarity = dot / (||prev|| * ||vector||); skip if > 0.90.
+              // If either norm is 0 (zero-vector from embedder), cosine falls back to
+              // raw dot (not cosine similarity) — entry will be written (fail-open).
+              const normPrev = Math.sqrt(prev.vector.reduce((s, v) => s + v * v, 0));
+              const normVec = Math.sqrt(vector.reduce((s, v) => s + v * v, 0));
+              const cosine = normPrev > 0 && normVec > 0 ? dot / (normPrev * normVec) : dot;
+              if (cosine > 0.90) { duplicateInBatch = true; break; }
+            }
+            if (duplicateInBatch) {
+              api.logger.info(
+                `memory-lancedb-pro: skipped duplicate-in-batch text for agent ${agentId}: "${text.slice(0, 40)}"`,
+              );
+              continue;
+            }
+
+            // Build metadata; if it fails, skip this entry rather than propagating
+            // the exception and leaving capturedEntries in a partial state.
+            let metadata: string;
+            try {
+              metadata = stringifySmartMetadata(
                 buildSmartMetadata(
                   {
                     text,
@@ -3365,23 +3424,76 @@ const memoryLanceDBProPlugin = {
                     suppressed_until_turn: 0,
                   },
                 ),
-              ),
-            });
-            stored++;
-
-            // Dual-write to Markdown mirror if enabled
-            if (mdMirror) {
-              await mdMirror(
-                { text, category, scope: defaultScope, timestamp: Date.now() },
-                { source: "auto-capture", agentId },
               );
+            } catch (metadataErr) {
+              api.logger.warn(
+                `memory-lancedb-pro: skipped entry whose metadata construction failed: "${text.slice(0, 40)}": ${String(metadataErr)}`,
+              );
+              continue;
             }
+
+            capturedEntries.push({
+              text,
+              vector,
+              importance: 0.7,
+              category,
+              scope: defaultScope,
+              metadata,
+            });
           }
 
-          if (stored > 0) {
-            api.logger.info(
-              `memory-lancedb-pro: auto-captured ${stored} memories for agent ${agentId} in scope ${defaultScope}`,
-            );
+          // FIX #675: bulkStore once (1 lock for N entries) instead of N store.store() calls (N locks).
+          // FIX #Bug-1 (post-Codex-review): mdMirror errors are handled separately and do NOT
+          // trigger the store.store() fallback (which would create duplicate rows).
+          if (capturedEntries.length > 0) {
+            try {
+              await store.bulkStore(capturedEntries);
+              api.logger.info(
+                `memory-lancedb-pro: auto-captured ${capturedEntries.length} memories for agent ${agentId} in scope ${defaultScope} (bulkStore)`,
+              );
+            } catch (err) {
+              api.logger.warn(
+                `memory-lancedb-pro: bulkStore failed for ${capturedEntries.length} entries, falling back to individual store: ${String(err)}`,
+              );
+              // Fallback: store individually, with DB dedup pre-check restored.
+              // Re-check DB dedup in fallback to catch similar entries written by
+              // concurrent requests between the initial check and bulkStore failure.
+              for (const entry of capturedEntries) {
+                let existing: Awaited<ReturnType<typeof store.vectorSearch>> = [];
+                try {
+                  existing = await store.vectorSearch(entry.vector, 1, 0.1, [entry.scope]);
+                } catch { /* fail-open */ }
+                if (existing.length > 0 && existing[0].score > 0.90) {
+                  api.logger.info(
+                    `memory-lancedb-pro: fallback dedup skipped "${entry.text.slice(0, 40)}"`,
+                  );
+                  continue;
+                }
+                await store.store(entry);
+              }
+              api.logger.info(
+                `memory-lancedb-pro: auto-captured ${capturedEntries.length} memories for agent ${agentId} (individual fallback)`,
+              );
+            }
+
+            // FIX #Bug-1: mdMirror is called AFTER bulkStore succeeds, with its own
+            // error handling. If mdMirror fails, bulkStore is ALREADY committed —
+            // we log the error and continue. We do NOT retry via store.store()
+            // (which would create duplicate rows in LanceDB).
+            if (mdMirror) {
+              for (const entry of capturedEntries) {
+                try {
+                  await mdMirror(
+                    { text: entry.text, category: entry.category, scope: entry.scope, timestamp: Date.now() },
+                    { source: "auto-capture", agentId },
+                  );
+                } catch (mdErr) {
+                  api.logger.warn(
+                    `memory-lancedb-pro: mdMirror failed for entry "${entry.text.slice(0, 40)}…", bulkStore already committed: ${String(mdErr)}`,
+                  );
+                }
+              }
+            }
           }
         } catch (err) {
           api.logger.warn(`memory-lancedb-pro: capture failed: ${String(err)}`);
@@ -3682,6 +3794,15 @@ const memoryLanceDBProPlugin = {
         if (isInternalReflectionSessionKey(sessionKey)) return;
         if (!sessionKey) return;
         pruneReflectionSessionState();
+
+        if (event.toolName === "exec") {
+          const resultTextRaw = extractTextFromToolResult(event.result);
+          const exitCodeMatch = resultTextRaw.match(
+            /(?:\bexit(?:\s+code)?|Command\s+exited)\s*[;:\s](\d+)\b/i
+          );
+          const actualExitCode = exitCodeMatch ? parseInt(exitCodeMatch[1], 10) : -1;
+          if (actualExitCode === 0) { return; }
+        }
 
         if (typeof event.error === "string" && event.error.trim().length > 0) {
           const signature = normalizeErrorSignature(event.error);
@@ -4342,6 +4463,7 @@ const memoryLanceDBProPlugin = {
     // ========================================================================
 
     let backupTimer: ReturnType<typeof setInterval> | null = null;
+    let dreamingTimer: ReturnType<typeof setInterval> | null = null;
     const BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
     async function runBackup() {
@@ -4510,8 +4632,6 @@ const memoryLanceDBProPlugin = {
         const dreamingUserConfig = (api.pluginConfig as Record<string, unknown>)?.dreaming as Record<string, unknown> | undefined;
         const dreamingCfg = mergeDreamingConfig(dreamingUserConfig);
 
-        let dreamingTimer: ReturnType<typeof setInterval> | null = null;
-
         if (dreamingCfg.enabled) {
           const { createDreamingEngine: createDreaming } = await import("./src/dreaming-engine.js");
 
@@ -4527,23 +4647,21 @@ const memoryLanceDBProPlugin = {
             log: dreamingLog,
             debugLog: dreamingDebug,
             workspaceDir: getDefaultWorkspaceDir(),
+            fallbackDimensions: embedder.dimensions,
           });
 
           // Simple cron scheduler: checks every 60s, matches minute+hour fields
-          function parseCron(expr: string): { minute: number[]; hour: number[] } {
+          function parseCron(expr: string) {
             const parts = expr.trim().split(/\s+/);
-            if (parts.length < 2) return { minute: [0], hour: [3] };
-            const parseField = (field: string, min: number, max: number): number[] => {
-              if (field === "*") {
-                const r: number[] = [];
-                for (let i = min; i <= max; i++) r.push(i);
-                return r;
-              }
+            if (parts.length < 2) return { minute: [0], hour: [3], dayOfMonth: undefined, month: undefined, dayOfWeek: undefined };
+            const parseField = (field: string, min: number, max: number): number[] | undefined => {
+              if (!field || field === "*") return undefined; // wildcard = match all
               return field.split(",").flatMap((p) => {
                 const stepMatch = p.match(/^(\*|\d+)\/(\d+)$/);
                 if (stepMatch) {
                   const base = stepMatch[1] === "*" ? min : parseInt(stepMatch[1], 10);
                   const step = parseInt(stepMatch[2], 10);
+                  if (step <= 0) return []; // guard: reject step=0 to prevent infinite loop
                   const r: number[] = [];
                   for (let i = base; i <= max; i += step) r.push(i);
                   return r;
@@ -4552,48 +4670,94 @@ const memoryLanceDBProPlugin = {
                 return Number.isFinite(n) ? [n] : [];
               });
             };
-            return { minute: parseField(parts[0], 0, 59), hour: parseField(parts[1], 0, 23) };
+            return {
+              minute: parseField(parts[0], 0, 59),
+              hour: parseField(parts[1], 0, 23),
+              dayOfMonth: parts.length > 2 ? parseField(parts[2], 1, 31) : undefined,
+              month: parts.length > 3 ? parseField(parts[3], 1, 12) : undefined,
+              dayOfWeek: parts.length > 4 ? parseField(parts[4], 0, 6) : undefined,
+            };
           }
 
           const parsedCron = parseCron(dreamingCfg.cron);
 
-          dreamingTimer = setInterval(() => {
-            const now = new Date();
-            if (!parsedCron.minute.includes(now.getMinutes()) || !parsedCron.hour.includes(now.getHours())) return;
+          let dreamingCycleRunning = false; // Cycle-level guard to prevent overlapping cycles
 
-            // Run dreaming for each accessible scope (MR1: scope isolation)
-            const scopes = scopeManager.getAllScopes();
+          dreamingTimer = setInterval(async () => {
+            const now = new Date();
+            if (parsedCron.minute && !parsedCron.minute.includes(now.getMinutes())) return;
+            if (parsedCron.hour && !parsedCron.hour.includes(now.getHours())) return;
+            if (parsedCron.dayOfMonth && !parsedCron.dayOfMonth.includes(now.getDate())) return;
+            if (parsedCron.month && !parsedCron.month.includes(now.getMonth() + 1)) return;
+            if (parsedCron.dayOfWeek && !parsedCron.dayOfWeek.includes(now.getDay())) return;
+
+            // Cycle-level guard: skip if a previous cycle is still running
+            if (dreamingCycleRunning) {
+              dreamingLog("skipping cycle — previous cycle still in progress");
+              return;
+            }
+            dreamingCycleRunning = true;
+            try {
+
+            // Run dreaming for each scope that has memories (MR1: scope isolation)
+            // Include both defined scopes and dynamic agent scopes discovered from the store
+            const definedScopes = scopeManager.getAllScopes();
+            const scopes = new Set(definedScopes);
+            try {
+              // Paginate through all memories to discover scopes (avoids 500-limit blind spot)
+              let offset = 0;
+              const batchSize = 1000;
+              while (true) {
+                const batch = await store.list(undefined, undefined, batchSize, offset);
+                if (batch.length === 0) break;
+                for (const m of batch) {
+                  if (m.scope) scopes.add(m.scope);
+                }
+                if (batch.length < batchSize) break;
+                offset += batchSize;
+              }
+            } catch {}
+            scopes.add("global");
+
+            // Run scopes sequentially to avoid write races on DREAMS.md
+            const dreamLines: string[] = [];
             for (const scope of scopes) {
-              dreamingEngine.run(scope).then((report) => {
+              try {
+                const report = await dreamingEngine.run(scope);
                 dreamingLog(
                   `cycle complete [${report.scope}] — ` +
                   `light:${report.phases.light.scanned}/${report.phases.light.transitions.length} transitions, ` +
                   `deep:${report.phases.deep.candidates}/${report.phases.deep.promoted} promoted, ` +
                   `rem:${report.phases.rem.patterns.length} patterns/${report.phases.rem.reflectionsCreated} reflections`,
                 );
-
-                // Write DREAMS.md
-                const workspaceDir = getDefaultWorkspaceDir();
-                const dreamsPath = join(workspaceDir, "DREAMS.md");
-                const dateStr = new Date().toISOString().replace("T", " ").slice(0, 19);
-                const lines = [
-                  `## Dream Cycle — ${dateStr} [${report.scope}]`, ``,
+                dreamLines.push(
+                  `## Dream Cycle — ${new Date().toISOString().replace("T", " ").slice(0, 19)} [${report.scope}]`, ``,
                   `**Light Sleep:** ${report.phases.light.scanned} scanned, ${report.phases.light.transitions.length} transitions`,
                   `**Deep Sleep:** ${report.phases.deep.candidates} candidates, ${report.phases.deep.promoted} promoted`,
                   `**REM:** ${report.phases.rem.patterns.length} patterns, ${report.phases.rem.reflectionsCreated} reflections`, ``,
-                ];
+                );
                 if (report.phases.rem.patterns.length > 0) {
-                  lines.push(`### Patterns`);
-                  for (const p of report.phases.rem.patterns) lines.push(`- ${p}`);
-                  lines.push("");
+                  dreamLines.push(`### Patterns`);
+                  for (const p of report.phases.rem.patterns) dreamLines.push(`- ${p}`);
+                  dreamLines.push("");
                 }
-                readFile(dreamsPath, "utf-8").then(
-                  (existing) => writeFile(dreamsPath, lines.join("\n") + "\n" + existing, "utf-8"),
-                  () => writeFile(dreamsPath, lines.join("\n") + "\n", "utf-8"),
-                ).catch(() => {});
-              }).catch((err) => {
-                dreamingLog(`cycle error: ${String(err)}`);
-              });
+              } catch (err) {
+                dreamingLog(`cycle error [${scope}]: ${String(err)}`);
+              }
+            }
+
+            // Write DREAMS.md once after all scopes complete
+            if (dreamLines.length > 0) {
+              const workspaceDir = getDefaultWorkspaceDir();
+              const dreamsPath = join(workspaceDir, "DREAMS.md");
+              try {
+                const existing = await readFile(dreamsPath, "utf-8").catch(() => "");
+                await writeFile(dreamsPath, dreamLines.join("\n") + "\n" + existing, "utf-8");
+              } catch {}
+            }
+
+            } finally {
+              dreamingCycleRunning = false;
             }
           }, 60_000);
 
@@ -4611,6 +4775,15 @@ const memoryLanceDBProPlugin = {
           clearInterval(dreamingTimer);
           dreamingTimer = null;
           api.logger.info("dreaming: scheduler stopped");
+        }
+        // Flush and destroy AccessTracker on plugin stop
+        try {
+          if (accessTracker) {
+            accessTracker.destroy();
+            api.logger.info("memory-lancedb-pro: AccessTracker destroyed");
+          }
+        } catch (err) {
+          api.logger.warn(`memory-lancedb-pro: AccessTracker cleanup failed: ${String(err)}`);
         }
         api.logger.info("memory-lancedb-pro: stopped");
       },

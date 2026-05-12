@@ -103,6 +103,8 @@ const DREAMING_SOURCE_TAG = "dreaming-engine";
 interface DreamingEngineParams {
   store: MemoryStore;
   embedder: { embed(text: string): Promise<number[]> };
+  /** Fallback vector dimension when embedding fails */
+  fallbackDimensions: number;
   decayEngine: { scoreAll(memories: DecayableMemory[], now: number): DecayScore[] };
   tierManager: { evaluateAll(memories: TierableMemory[], decayScores: DecayScore[], now: number): TierTransition[] };
   config: DreamingConfig;
@@ -111,14 +113,69 @@ interface DreamingEngineParams {
   workspaceDir?: string;
 }
 
+/**
+ * Paginate through store.list() results, collecting only exact-scope rows.
+ * This prevents starvation when null-scope rows fill the bounded page before
+ * target-scope rows appear in the sorted result set.
+ */
+async function collectExactScope(
+  store: MemoryStore,
+  scope: string,
+  needed: number,
+  pageSize: number,
+  debugLog: (msg: string) => void,
+): Promise<MemoryEntry[]> {
+  const collected: MemoryEntry[] = [];
+  let offset = 0;
+  let emptyPages = 0;
+  const MAX_EMPTY_PAGES = 3; // Stop after 3 consecutive pages with no new matches
+
+  while (collected.length < needed) {
+    const page = await store.list([scope], undefined, pageSize, offset);
+    if (page.length === 0) break;
+
+    let newMatches = 0;
+    for (const entry of page) {
+      if (entry.scope === scope) {
+        collected.push(entry);
+        newMatches++;
+      }
+    }
+
+    if (newMatches === 0) {
+      emptyPages++;
+      if (emptyPages >= MAX_EMPTY_PAGES) {
+        debugLog(`paginate [${scope}]: stopping after ${MAX_EMPTY_PAGES} consecutive pages with no exact-scope matches`);
+        break;
+      }
+    } else {
+      emptyPages = 0;
+    }
+
+    // If page returned fewer than pageSize, we've exhausted results
+    if (page.length < pageSize) break;
+    offset += pageSize;
+  }
+
+  debugLog(`paginate [${scope}]: collected ${collected.length} exact-scope entries (needed ${needed})`);
+  return collected;
+}
+
 export function createDreamingEngine(params: DreamingEngineParams): DreamingEngine {
   const { store, embedder, decayEngine, tierManager, config, log, debugLog } = params;
 
   const verbose = config.verboseLogging;
   const dbg = verbose ? debugLog : () => {};
+  const runningScopes = new Set<string>(); // Prevent overlapping cycles per scope
 
   return {
     async run(scope: string): Promise<DreamingReport> {
+      if (runningScopes.has(scope)) {
+        log(`Skipping ${scope} — previous cycle still running`);
+        return { timestamp: Date.now(), scope, phases: { light: { scanned: 0, transitions: [] }, deep: { candidates: 0, promoted: 0 }, rem: { patterns: [], reflectionsCreated: 0 } } };
+      }
+      runningScopes.add(scope);
+      try {
       const now = Date.now();
       log(`💤 Dreaming cycle started (scope: ${scope})`);
 
@@ -156,6 +213,9 @@ export function createDreamingEngine(params: DreamingEngineParams): DreamingEngi
 
       log("☀️ Dreaming cycle complete");
       return report;
+      } finally {
+        runningScopes.delete(scope);
+      }
     },
   };
 
@@ -167,8 +227,8 @@ export function createDreamingEngine(params: DreamingEngineParams): DreamingEngi
 
     dbg(`Light sleep [${scope}]: fetching memories newer than ${new Date(cutoff).toISOString()}`);
 
-    // MR1: Filter by scope
-    const entries = await store.list([scope], undefined, limit * 2, 0);
+    // MR1: Use paginated exact-scope collection to avoid starvation from null-scope rows
+    const entries = await collectExactScope(store, scope, limit * 2, limit * 2, dbg);
     const recent = entries.filter((e) => e.timestamp > cutoff).slice(0, limit);
 
     dbg(`Light sleep [${scope}]: ${recent.length} recent memories to evaluate`);
@@ -236,8 +296,8 @@ export function createDreamingEngine(params: DreamingEngineParams): DreamingEngi
 
     dbg(`Deep sleep [${scope}]: fetching Working-tier memories`);
 
-    // MR1: Filter by scope
-    const entries = await store.list([scope], undefined, limit * 5, 0);
+    // MR1: Use paginated exact-scope collection to avoid starvation from null-scope rows
+    const entries = await collectExactScope(store, scope, limit * 5, limit * 5, dbg);
     const working = entries.filter((e) => {
       const parsed = parseSmartMetadata(e.metadata, e);
       return parsed.tier === "working";
@@ -267,21 +327,35 @@ export function createDreamingEngine(params: DreamingEngineParams): DreamingEngi
     const scores = decayEngine.scoreAll(decayable, now);
     const scoreMap = new Map(scores.map((s) => [s.memoryId, s]));
 
+    // recencyHalfLifeDays: boost composite score for recently-accessed memories
+    const recencyHalfLifeMs = config.phases.deep.recencyHalfLifeDays * 86_400_000;
+
     // Promote memories that meet both thresholds
     let promoted = 0;
     for (const entry of nonReflection) {
       const parsed = parseSmartMetadata(entry.metadata, entry);
       const score = scoreMap.get(entry.id);
       const accessCount = parsed.access_count ?? 0;
-      const composite = score?.composite ?? 0;
+      let composite = score?.composite ?? 0;
+
+      // Apply recency boost: memories accessed within recencyHalfLifeDays get a
+      // multiplicative boost up to +0.2 for very recent accesses
+      const lastAccessed = parsed.last_accessed_at ?? entry.timestamp;
+      const ageMs = now - lastAccessed;
+      if (ageMs < recencyHalfLifeMs && recencyHalfLifeMs > 0) {
+        const recencyRatio = 1 - (ageMs / recencyHalfLifeMs); // 1.0 = just accessed, 0.0 = half-life elapsed
+        const recencyBoost = recencyRatio * 0.2;
+        composite = Math.min(1.0, composite + recencyBoost);
+      }
 
       if (composite >= minScore && accessCount >= minRecallCount) {
         // Boost importance by 20% (capped at 1.0)
         const newImportance = Math.min(1.0, entry.importance * 1.2);
+        // Update top-level importance column + metadata tier
+        await store.update(entry.id, { importance: newImportance });
         await store.patchMetadata(entry.id, {
           tier: "core",
           tier_updated_at: now,
-          importance: newImportance,
         });
         dbg(`  ⬆ Deep sleep promoted: ${entry.id} (score=${composite.toFixed(3)}, accesses=${accessCount})`);
         promoted++;
@@ -299,8 +373,8 @@ export function createDreamingEngine(params: DreamingEngineParams): DreamingEngi
 
     dbg(`REM [${scope}]: analyzing memory patterns`);
 
-    // MR1: Filter by scope
-    const entries = await store.list([scope], undefined, limit, 0);
+    // MR1: Use paginated exact-scope collection to avoid starvation from null-scope rows
+    const entries = await collectExactScope(store, scope, limit, limit, dbg);
     const recent = entries.filter((e) => e.timestamp > cutoff);
 
     // MR2: Exclude dreaming reflections from analysis
@@ -367,31 +441,33 @@ export function createDreamingEngine(params: DreamingEngineParams): DreamingEngi
 
       // F2: Embed the reflection so it's searchable and compatible with LanceDB schema
       let vector: number[];
+      let embeddedOk = false;
       try {
         vector = await embedder.embed(reflectionText);
-      } catch {
-        dbg("REM: embedding failed, falling back to zero vector");
-        vector = new Array(1024).fill(0);
+        embeddedOk = true;
+      } catch (embedErr) {
+        log(`⚠️ REM: embedding failed for reflection, skipping store: ${String(embedErr)}`);
       }
 
-      // MR1: Store reflection in the same scope as source memories
-      // MR2: Tag with source metadata to prevent re-processing
-      await store.store({
-        text: reflectionText,
-        vector,
-        category: "reflection",
-        scope,
-        importance: 0.4,
-        metadata: JSON.stringify({
-          dream_timestamp: now,
-          patterns_count: patterns.length,
-          memories_analyzed: sourceMemories.length,
-          source: DREAMING_SOURCE_TAG,
-        }),
-      });
-      reflectionsCreated = 1;
-
-      dbg(`REM [${scope}]: created reflection memory with ${patterns.length} pattern(s)`);
+      if (embeddedOk) {
+        // MR1: Store reflection in the same scope as source memories
+        // MR2: Tag with source metadata to prevent re-processing
+        await store.store({
+          text: reflectionText,
+          vector,
+          category: "reflection",
+          scope,
+          importance: 0.4,
+          metadata: JSON.stringify({
+            dream_timestamp: now,
+            patterns_count: patterns.length,
+            memories_analyzed: sourceMemories.length,
+            source: DREAMING_SOURCE_TAG,
+          }),
+        });
+        reflectionsCreated = 1;
+        dbg(`REM [${scope}]: created reflection memory with ${patterns.length} pattern(s)`);
+      }
     }
 
     return { patterns, reflectionsCreated };
