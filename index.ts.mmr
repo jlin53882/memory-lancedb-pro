@@ -7,7 +7,7 @@ import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { homedir, tmpdir } from "node:os";
 import { join, dirname, basename, win32 as winPath } from "node:path";
 import { readFile, readdir, writeFile, mkdir, appendFile, unlink, stat } from "node:fs/promises";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
@@ -26,7 +26,6 @@ import {
   getEffectiveVectorDimensions,
 } from "./src/embedder.js";
 import { createRetriever, DEFAULT_RETRIEVAL_CONFIG } from "./src/retriever.js";
-import { AccessTracker } from "./src/access-tracker.js";
 import { createScopeManager, resolveScopeFilter, isSystemBypassId, parseAgentIdFromSessionKey } from "./src/scopes.js";
 import { createMigrator } from "./src/migrate.js";
 import { registerAllMemoryTools } from "./src/tools.js";
@@ -66,8 +65,6 @@ import { createLlmClient } from "./src/llm-client.js";
 import { createDecayEngine, DEFAULT_DECAY_CONFIG } from "./src/decay-engine.js";
 import { createTierManager, DEFAULT_TIER_CONFIG } from "./src/tier-manager.js";
 import { createMemoryUpgrader } from "./src/memory-upgrader.js";
-import { createDreamingEngine, mergeDreamingConfig } from "./src/dreaming-engine.js";
-import type { DreamingConfig } from "./src/dreaming-engine.js";
 import {
   buildSmartMetadata,
   parseSmartMetadata,
@@ -271,7 +268,6 @@ interface PluginConfig {
      */
     categoryField?: string;
   };
-  dreaming?: DreamingConfig;
 }
 
 type ReflectionThinkLevel = "off" | "minimal" | "low" | "medium" | "high";
@@ -287,20 +283,9 @@ function getDefaultDbPath(): string {
   return join(home, ".openclaw", "memory", "lancedb-pro");
 }
 
-// MR1: Cache workspace dir to avoid repeated synchronous readFileSync in hot path
-let _cachedWorkspaceDir: string | null = null;
-
 function getDefaultWorkspaceDir(): string {
-  if (_cachedWorkspaceDir) return _cachedWorkspaceDir;
   const home = homedir();
-  const mainDir = join(home, ".openclaw", "workspace-main");
-  // Check existence with existsSync instead of reading file contents
-  if (existsSync(join(mainDir, "AGENTS.md"))) {
-    _cachedWorkspaceDir = mainDir;
-    return mainDir;
-  }
-  _cachedWorkspaceDir = join(home, ".openclaw", "workspace");
-  return _cachedWorkspaceDir;
+  return join(home, ".openclaw", "workspace");
 }
 
 function getDefaultMdMirrorDir(): string {
@@ -2031,21 +2016,12 @@ function _initPluginState(api: OpenClawPluginApi): PluginSingletonState {
     ...DEFAULT_TIER_CONFIG,
     ...(config.tier || {}),
   });
-const retriever = createRetriever(
+  const retriever = createRetriever(
     store,
     embedder,
     { ...DEFAULT_RETRIEVAL_CONFIG, ...config.retrieval },
     { decayEngine },
   );
-
-  // Wire access tracker so recall operations update access_count on memories
-  const accessTracker = new AccessTracker({
-    store,
-    logger: { warn: (...args: unknown[]) => api.logger.warn(...args), info: (...args: unknown[]) => api.logger.info(...args) },
-    debounceMs: 5000,
-  });
-  retriever.setAccessTracker(accessTracker);
-
   const scopeManager = createScopeManager(config.scopes);
 
   const clawteamScopes = parseClawteamScopes(process.env.CLAWTEAM_MEMORY_SCOPE);
@@ -4515,7 +4491,6 @@ const memoryLanceDBProPlugin = {
     // ========================================================================
 
     let backupTimer: ReturnType<typeof setInterval> | null = null;
-    let dreamingTimer: ReturnType<typeof setInterval> | null = null;
     const BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
     async function runBackup() {
