@@ -4677,10 +4677,21 @@ const memoryLanceDBProPlugin = {
         setTimeout(() => void runBackup(), 60_000); // 1 min after start
         backupTimer = setInterval(() => void runBackup(), BACKUP_INTERVAL_MS);
       },
-      stop: async () => {
+        stop: async () => {
+        // F3 fix: Clean up timers and AccessTracker on shutdown
         if (backupTimer) {
           clearInterval(backupTimer);
           backupTimer = null;
+        }
+        if (dreamingTimer) {
+          clearInterval(dreamingTimer);
+          dreamingTimer = null;
+        }
+        // AccessTracker is attached to retriever; give it a chance to flush pending writes
+        try {
+          retriever.setAccessTracker(null);
+        } catch {
+          // Non-critical: best-effort cleanup
         }
         api.logger.info("memory-lancedb-pro: stopped");
       },

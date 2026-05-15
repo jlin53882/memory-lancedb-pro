@@ -60,6 +60,8 @@ interface EnrichedMetadata {
   last_accessed_at: number;
   upgraded_from: string; // original 5-category
   upgraded_at: number;   // timestamp of upgrade
+  // F2: Preserve source field so dreaming-engine reflections survive compact/upgrade
+  source?: string;
 }
 
 // ============================================================================
