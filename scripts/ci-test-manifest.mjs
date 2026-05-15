@@ -15,16 +15,18 @@ export const CI_TEST_MANIFEST = [
   { group: "storage-and-schema", runner: "node", file: "test/reflection-bypass-hook.test.mjs", args: ["--test"] },
   { group: "storage-and-schema", runner: "node", file: "test/smart-extractor-scope-filter.test.mjs", args: ["--test"] },
   { group: "storage-and-schema", runner: "node", file: "test/store-empty-scope-filter.test.mjs", args: ["--test"] },
+  { group: "storage-and-schema", runner: "node", file: "test/storage-path-normalization.test.mjs", args: ["--test"] },
   { group: "core-regression", runner: "node", file: "test/recall-text-cleanup.test.mjs", args: ["--test"] },
-  { group: "core-regression", runner: "node", file: "test/to-import-specifier-windows.test.mjs", args: ["--test"] },
   { group: "storage-and-schema", runner: "node", file: "test/update-consistency-lancedb.test.mjs" },
   { group: "core-regression", runner: "node", file: "test/strip-envelope-metadata.test.mjs", args: ["--test"] },
+  { group: "core-regression", runner: "node", file: "test/auto-recall-timeout.test.mjs", args: ["--test"] },
   { group: "cli-smoke", runner: "node", file: "test/import-markdown/import-markdown.test.mjs", args: ["--test"] },
   { group: "cli-smoke", runner: "node", file: "test/cli-smoke.mjs" },
   { group: "cli-smoke", runner: "node", file: "test/functional-e2e.mjs" },
   { group: "storage-and-schema", runner: "node", file: "test/per-agent-auto-recall.test.mjs", args: ["--test"] },
   { group: "core-regression", runner: "node", file: "test/retriever-rerank-regression.mjs" },
   { group: "core-regression", runner: "node", file: "test/smart-memory-lifecycle.mjs" },
+  { group: "core-regression", runner: "node", file: "test/dreaming-engine.test.ts" },
   { group: "core-regression", runner: "node", file: "test/smart-extractor-branches.mjs" },
   { group: "core-regression", runner: "node", file: "test/smart-extractor-batch-embed.test.mjs" },
   { group: "packaging-and-workflow", runner: "node", file: "test/plugin-manifest-regression.mjs" },
@@ -54,12 +56,26 @@ export const CI_TEST_MANIFEST = [
   // Issue #629 batch embedding fix
   { group: "llm-clients-and-auth", runner: "node", file: "test/embedder-ollama-batch-routing.test.mjs" },
   // Issue #665 bulkStore tests
+  // Issue #690 cross-call batch accumulator tests
+  { group: "storage-and-schema", runner: "node", file: "test/issue-690-cross-call-batch.test.mjs", args: ["--test"] },
+  // Issue #665 bulkStore tests (from upstream)
   { group: "storage-and-schema", runner: "node", file: "test/bulk-store.test.mjs", args: ["--test"] },
   { group: "storage-and-schema", runner: "node", file: "test/bulk-store-edge-cases.test.mjs", args: ["--test"] },
   { group: "storage-and-schema", runner: "node", file: "test/smart-extractor-bulk-store.test.mjs", args: ["--test"] },
   { group: "storage-and-schema", runner: "node", file: "test/smart-extractor-bulk-store-edge-cases.test.mjs", args: ["--test"] },
-  // Issue #680 regression tests
+  // Issue #680 regression tests (from upstream)
   { group: "core-regression", runner: "node", file: "test/memory-reflection-issue680-tdd.test.mjs", args: ["--test"] },
+  // Issue #606 SDK migration Bug 2 regression tests
+  { group: "core-regression", runner: "node", file: "test/issue606_sdk-migration.test.mjs" },
+  // PR #713 inference regression tests - inferProviderFromBaseURL + model fallback
+  { group: "core-regression", runner: "node", file: "test/infer-provider-from-baseurl.test.mjs" },
+  // Issue #736 recall governance - isRecallUsed() unit tests
+  { group: "core-regression", runner: "node", file: "test/is-recall-used.test.mjs", args: ["--test"] },
+  // Issue #492 agentId validation tests
+  { group: "core-regression", runner: "node", file: "test/agentid-validation.test.mjs", args: ["--test"] },
+  { group: "core-regression", runner: "node", file: "test/command-reflection-guard.test.mjs", args: ["--test"] },
+  // Tier 1 memory counter fix
+  { group: "core-regression", runner: "node", file: "test/tier1-counters.test.mjs", args: ["--test"] },
 ];
 
 export function getEntriesForGroup(group) {
