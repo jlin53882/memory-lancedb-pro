@@ -72,8 +72,8 @@ export interface RetrievalConfig {
    */
   lengthNormAnchor: number;
   /**
-   * Hard cutoff after rerank: discard results below this score.
-   * Applied after all scoring stages (rerank, recency, importance, length norm).
+   * Hard cutoff after final scoring: discard returned results below this score.
+   * Applied after rerank, recency, importance, length norm, and time/lifecycle decay.
    * Higher = fewer but more relevant results. (default: 0.35)
    */
   hardMinScore: number;
@@ -105,6 +105,9 @@ export interface RetrievalContext {
   category?: string;
   /** Retrieval source: "manual" for user-triggered, "auto-recall" for system-initiated, "cli" for CLI commands. */
   source?: "manual" | "auto-recall" | "cli";
+  /** AbortSignal to cancel in-flight embedding HTTP calls when retrieval times out.
+   *  When aborted, retriever.reject() exits early instead of holding the session lock. */
+  signal?: AbortSignal;
 }
 
 export interface RetrievalResult extends MemorySearchResult {
@@ -169,6 +172,16 @@ export interface RetrievalDiagnostics {
     | "hybrid.fuseResults"
     | "hybrid.rerank"
     | "hybrid.postProcess";
+  rerankFallback?: {
+    provider: NonNullable<RetrievalConfig["rerankProvider"]>;
+    reason:
+      | "invalid_response"
+      | "http_error"
+      | "timeout"
+      | "request_error"
+      | "cosine_error";
+    message: string;
+  };
   errorMessage?: string;
 }
 
@@ -226,7 +239,7 @@ function attachFailureStage(
   stage: NonNullable<RetrievalDiagnostics["failureStage"]>,
 ): TaggedRetrievalError {
   const tagged =
-    error instanceof Error ? (error as TaggedRetrievalError) : new Error(String(error));
+    error instanceof Error ? (error as TaggedRetrievalError) : (new Error(String(error)) as TaggedRetrievalError);
   tagged.retrievalFailureStage = stage;
   return tagged;
 }
@@ -237,6 +250,10 @@ function extractFailureStage(
   return error instanceof Error
     ? (error as TaggedRetrievalError).retrievalFailureStage
     : undefined;
+}
+
+function formatErrorMessage(error: unknown): string {
+  return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
 }
 
 function buildDropSummary(
@@ -284,20 +301,20 @@ function buildDropSummary(
     },
     {
       order: 6,
-      stage: "hardMinScore" as const,
+      stage: "timeDecay" as const,
       before: diagnostics.stageCounts.afterLengthNorm,
-      after: diagnostics.stageCounts.afterHardMinScore,
+      after: diagnostics.stageCounts.afterTimeDecay,
     },
     {
       order: 7,
-      stage: "timeDecay" as const,
-      before: diagnostics.stageCounts.afterHardMinScore,
-      after: diagnostics.stageCounts.afterTimeDecay,
+      stage: "hardMinScore" as const,
+      before: diagnostics.stageCounts.afterTimeDecay,
+      after: diagnostics.stageCounts.afterHardMinScore,
     },
     {
       order: 8,
       stage: "noiseFilter" as const,
-      before: diagnostics.stageCounts.afterTimeDecay,
+      before: diagnostics.stageCounts.afterHardMinScore,
       after: diagnostics.stageCounts.afterNoiseFilter,
     },
     {
@@ -344,7 +361,10 @@ interface RerankItem {
   score: number;
 }
 
-/** Build provider-specific request headers and body */
+/** Build provider-specific request headers and body
+ * Provider encoding: tei= texts, dashscope= input/documents, pinecone= {text}, voyage= top_k, jina= top_n
+ * Note: Documents already sliced BEFORE this call - all providers receive limited candidates.
+ */
 function buildRerankRequest(
   provider: RerankProvider,
   apiKey: string,
@@ -559,7 +579,7 @@ export class MemoryRetriever {
   }
 
   async retrieve(context: RetrievalContext): Promise<RetrievalResult[]> {
-    const { query, limit, scopeFilter, category, source } = context;
+    const { query, limit, scopeFilter, category, source, signal } = context;
     const safeLimit = clampInt(limit, 1, 20);
     this.lastDiagnostics = null;
     const diagnostics: RetrievalDiagnostics = {
@@ -597,34 +617,22 @@ export class MemoryRetriever {
       // Check if query contains tag prefixes -> use BM25-only + mustContain
       const tagTokens = this.extractTagTokens(query);
       let results: RetrievalResult[];
+      let mode: "bm25" | "vector" | "hybrid";
+
       if (tagTokens.length > 0) {
+        mode = "bm25";
         results = await this.bm25OnlyRetrieval(
-          query,
-          tagTokens,
-          safeLimit,
-          scopeFilter,
-          category,
-          trace,
-          diagnostics,
+          query, tagTokens, safeLimit, scopeFilter, category, trace, diagnostics,
         );
       } else if (this.config.mode === "vector" || !this.store.hasFtsSupport) {
+        mode = "vector";
         results = await this.vectorOnlyRetrieval(
-          query,
-          safeLimit,
-          scopeFilter,
-          category,
-          trace,
-          diagnostics,
+          query, safeLimit, scopeFilter, category, trace, diagnostics, signal,
         );
       } else {
+        mode = "hybrid";
         results = await this.hybridRetrieval(
-          query,
-          safeLimit,
-          scopeFilter,
-          category,
-          trace,
-          source,
-          diagnostics,
+          query, safeLimit, scopeFilter, category, trace, source, diagnostics, signal,
         );
       }
 
@@ -633,11 +641,6 @@ export class MemoryRetriever {
       this.lastDiagnostics = diagnostics;
 
       if (trace && this._statsCollector) {
-        const mode = tagTokens.length > 0
-          ? "bm25"
-          : (this.config.mode === "vector" || !this.store.hasFtsSupport)
-            ? "vector"
-            : "hybrid";
         const finalTrace = trace.finalize(query, mode);
         this._statsCollector.recordQuery(finalTrace, source || "unknown");
       }
@@ -665,29 +668,58 @@ export class MemoryRetriever {
   async retrieveWithTrace(
     context: RetrievalContext,
   ): Promise<{ results: RetrievalResult[]; trace: RetrievalTrace }> {
-    const { query, limit, scopeFilter, category, source } = context;
+    const { query, limit, scopeFilter, category, source, signal } = context;
     const safeLimit = clampInt(limit, 1, 20);
     const trace = new TraceCollector();
+    const diagnostics: RetrievalDiagnostics = {
+      source,
+      mode: this.config.mode,
+      originalQuery: query,
+      bm25Query: this.config.mode === "vector" ? null : query,
+      queryExpanded: false,
+      limit: safeLimit,
+      scopeFilter: scopeFilter ? [...scopeFilter] : undefined,
+      category,
+      vectorResultCount: 0,
+      bm25ResultCount: 0,
+      fusedResultCount: 0,
+      finalResultCount: 0,
+      stageCounts: {
+        afterMinScore: 0,
+        rerankInput: 0,
+        afterRerank: 0,
+        afterRecency: 0,
+        afterImportance: 0,
+        afterLengthNorm: 0,
+        afterTimeDecay: 0,
+        afterHardMinScore: 0,
+        afterNoiseFilter: 0,
+        afterDiversity: 0,
+      },
+      dropSummary: [],
+    };
 
     const tagTokens = this.extractTagTokens(query);
     let results: RetrievalResult[];
+    let mode: "bm25" | "vector" | "hybrid";
 
     if (tagTokens.length > 0) {
+      mode = "bm25";
       results = await this.bm25OnlyRetrieval(
-        query, tagTokens, safeLimit, scopeFilter, category, trace,
+        query, tagTokens, safeLimit, scopeFilter, category, trace, diagnostics,
       );
     } else if (this.config.mode === "vector" || !this.store.hasFtsSupport) {
+      mode = "vector";
       results = await this.vectorOnlyRetrieval(
-        query, safeLimit, scopeFilter, category, trace,
+        query, safeLimit, scopeFilter, category, trace, diagnostics, signal,
       );
     } else {
+      mode = "hybrid";
       results = await this.hybridRetrieval(
-        query, safeLimit, scopeFilter, category, trace,
+        query, safeLimit, scopeFilter, category, trace, source, diagnostics, signal,
       );
     }
 
-    const mode = tagTokens.length > 0 ? "bm25"
-      : (this.config.mode === "vector" || !this.store.hasFtsSupport) ? "vector" : "hybrid";
     const finalTrace = trace.finalize(query, mode);
 
     if (this._statsCollector) {
@@ -717,11 +749,35 @@ export class MemoryRetriever {
     category?: string,
     trace?: TraceCollector,
     diagnostics?: RetrievalDiagnostics,
+    signal?: AbortSignal,
   ): Promise<RetrievalResult[]> {
     let failureStage: RetrievalDiagnostics["failureStage"] = "vector.embedQuery";
     try {
       const candidatePoolSize = Math.max(this.config.candidatePoolSize, limit * 2);
-      const queryVector = await this.embedder.embedQuery(query);
+      let queryVector: number[];
+      try {
+        queryVector = await this.embedder.embedQuery(query, signal);
+      } catch (embedError) {
+        // Only do BM25 fallback for non-abort errors (network/API failures).
+        // If the caller aborted the signal, re-throw immediately — we shouldn't
+        // waste resources doing fallback retrieval after a deliberate cancel.
+        if (signal?.aborted) {
+          throw embedError;
+        }
+        // Fallback to BM25 if embedding fails (e.g., network timeout, API error)
+        diagnostics.bm25Query = query;
+        queryVector = [];
+        const bm25Results = await this.bm25OnlyRetrieval(
+          query, [], limit, scopeFilter, category, trace, diagnostics,
+        );
+        if (bm25Results.length > 0) {
+          trace?.startStage("embed_fallback_bm25", bm25Results.map((r) => r.entry.id));
+          diagnostics.dropSummary = buildDropSummary(diagnostics);
+          this.lastDiagnostics = diagnostics;
+          return bm25Results;
+        }
+        throw embedError;
+      }
       failureStage = "vector.vectorSearch";
       const results = await this.store.vectorSearch(
         queryVector,
@@ -771,15 +827,15 @@ export class MemoryRetriever {
       if (diagnostics) diagnostics.stageCounts.afterImportance = weighted.length;
       const lengthNormalized = this.applyLengthNormalization(weighted);
       if (diagnostics) diagnostics.stageCounts.afterLengthNorm = lengthNormalized.length;
-      const hardFiltered = lengthNormalized.filter((r) => r.score >= this.config.hardMinScore);
-      if (diagnostics) diagnostics.stageCounts.afterHardMinScore = hardFiltered.length;
       const timeOrDecayRanked = this.decayEngine
-        ? this.applyDecayBoost(hardFiltered)
-        : this.applyTimeDecay(hardFiltered);
+        ? this.applyDecayBoost(lengthNormalized)
+        : this.applyTimeDecay(lengthNormalized);
       if (diagnostics) diagnostics.stageCounts.afterTimeDecay = timeOrDecayRanked.length;
+      const hardFiltered = timeOrDecayRanked.filter((r) => r.score >= this.config.hardMinScore);
+      if (diagnostics) diagnostics.stageCounts.afterHardMinScore = hardFiltered.length;
       const denoised = this.config.filterNoise
-        ? filterNoise(timeOrDecayRanked, (r) => r.entry.text)
-        : timeOrDecayRanked;
+        ? filterNoise(hardFiltered, (r) => r.entry.text)
+        : hardFiltered;
       if (diagnostics) diagnostics.stageCounts.afterNoiseFilter = denoised.length;
       const deduplicated = this.applyMMRDiversity(denoised);
       if (diagnostics) {
@@ -870,23 +926,23 @@ export class MemoryRetriever {
     trace?.endStage(lengthNormalized.map((r) => r.entry.id), lengthNormalized.map((r) => r.score));
     if (diagnostics) diagnostics.stageCounts.afterLengthNorm = lengthNormalized.length;
 
-    trace?.startStage("hard_cutoff", lengthNormalized.map((r) => r.entry.id));
-    const hardFiltered = lengthNormalized.filter((r) => r.score >= this.config.hardMinScore);
-    trace?.endStage(hardFiltered.map((r) => r.entry.id), hardFiltered.map((r) => r.score));
-    if (diagnostics) diagnostics.stageCounts.afterHardMinScore = hardFiltered.length;
-
     const decayStageName = this.decayEngine ? "decay_boost" : "time_decay";
-    trace?.startStage(decayStageName, hardFiltered.map((r) => r.entry.id));
+    trace?.startStage(decayStageName, lengthNormalized.map((r) => r.entry.id));
     const lifecycleRanked = this.decayEngine
-      ? this.applyDecayBoost(hardFiltered)
-      : this.applyTimeDecay(hardFiltered);
+      ? this.applyDecayBoost(lengthNormalized)
+      : this.applyTimeDecay(lengthNormalized);
     trace?.endStage(lifecycleRanked.map((r) => r.entry.id), lifecycleRanked.map((r) => r.score));
     if (diagnostics) diagnostics.stageCounts.afterTimeDecay = lifecycleRanked.length;
 
-    trace?.startStage("noise_filter", lifecycleRanked.map((r) => r.entry.id));
+    trace?.startStage("hard_cutoff", lifecycleRanked.map((r) => r.entry.id));
+    const hardFiltered = lifecycleRanked.filter((r) => r.score >= this.config.hardMinScore);
+    trace?.endStage(hardFiltered.map((r) => r.entry.id), hardFiltered.map((r) => r.score));
+    if (diagnostics) diagnostics.stageCounts.afterHardMinScore = hardFiltered.length;
+
+    trace?.startStage("noise_filter", hardFiltered.map((r) => r.entry.id));
     const denoised = this.config.filterNoise
-      ? filterNoise(lifecycleRanked, (r) => r.entry.text)
-      : lifecycleRanked;
+      ? filterNoise(hardFiltered, (r) => r.entry.text)
+      : hardFiltered;
     trace?.endStage(denoised.map((r) => r.entry.id), denoised.map((r) => r.score));
     if (diagnostics) diagnostics.stageCounts.afterNoiseFilter = denoised.length;
 
@@ -907,11 +963,35 @@ export class MemoryRetriever {
     trace?: TraceCollector,
     source?: RetrievalContext["source"],
     diagnostics?: RetrievalDiagnostics,
+    signal?: AbortSignal,
   ): Promise<RetrievalResult[]> {
     let failureStage: RetrievalDiagnostics["failureStage"] = "hybrid.embedQuery";
+    let queryVector: number[];
     try {
       const candidatePoolSize = Math.max(this.config.candidatePoolSize, limit * 2);
-      const queryVector = await this.embedder.embedQuery(query);
+      try {
+        queryVector = await this.embedder.embedQuery(query, signal);
+      } catch (embedError) {
+        // Only do BM25 fallback for non-abort errors (network/API failures).
+        // If the caller aborted the signal, re-throw immediately — we shouldn't
+        // waste resources doing fallback retrieval after a deliberate cancel.
+        if (signal?.aborted) {
+          throw embedError;
+        }
+        // Fallback to BM25 if embedding fails (e.g., network timeout, API error)
+        const bm25Query = this.buildBM25Query(query, source);
+        diagnostics.bm25Query = bm25Query;
+        const bm25Results = await this.bm25OnlyRetrieval(
+          bm25Query, [], limit, scopeFilter, category, trace, diagnostics,
+        );
+        if (bm25Results.length > 0) {
+          trace?.startStage("embed_fallback_bm25", bm25Results.map((r) => r.entry.id));
+          diagnostics.dropSummary = buildDropSummary(diagnostics);
+          this.lastDiagnostics = diagnostics;
+          return bm25Results;
+        }
+        throw embedError;
+      }
       const bm25Query = this.buildBM25Query(query, source);
       if (diagnostics) {
         diagnostics.bm25Query = bm25Query;
@@ -938,8 +1018,8 @@ export class MemoryRetriever {
       const vectorResult_ = settledResults[0];
       const bm25Result_ = settledResults[1];
 
-      let vectorResults: RetrievalResult[];
-      let bm25Results: RetrievalResult[];
+      let vectorResults: Array<MemorySearchResult & { rank: number }>;
+      let bm25Results: Array<MemorySearchResult & { rank: number }>;
 
       if (vectorResult_.status === "rejected") {
         const error = attachFailureStage(vectorResult_.reason, "hybrid.vectorSearch");
@@ -1019,7 +1099,7 @@ export class MemoryRetriever {
       failureStage = "hybrid.rerank";
       if (this.config.rerank !== "none") {
         trace?.startStage("rerank", filtered.map((r) => r.entry.id));
-        reranked = await this.rerankResults(query, queryVector, rerankInput);
+        reranked = await this.rerankResults(query, queryVector, rerankInput, diagnostics);
         trace?.endStage(reranked.map((r) => r.entry.id), reranked.map((r) => r.score));
       } else {
         reranked = filtered;
@@ -1054,23 +1134,23 @@ export class MemoryRetriever {
       trace?.endStage(lengthNormalized.map((r) => r.entry.id), lengthNormalized.map((r) => r.score));
       if (diagnostics) diagnostics.stageCounts.afterLengthNorm = lengthNormalized.length;
 
-      trace?.startStage("hard_cutoff", lengthNormalized.map((r) => r.entry.id));
-      const hardFiltered = lengthNormalized.filter((r) => r.score >= this.config.hardMinScore);
-      trace?.endStage(hardFiltered.map((r) => r.entry.id), hardFiltered.map((r) => r.score));
-      if (diagnostics) diagnostics.stageCounts.afterHardMinScore = hardFiltered.length;
-
       const decayStageName = this.decayEngine ? "decay_boost" : "time_decay";
-      trace?.startStage(decayStageName, hardFiltered.map((r) => r.entry.id));
+      trace?.startStage(decayStageName, lengthNormalized.map((r) => r.entry.id));
       const lifecycleRanked = this.decayEngine
-        ? this.applyDecayBoost(hardFiltered)
-        : this.applyTimeDecay(hardFiltered);
+        ? this.applyDecayBoost(lengthNormalized)
+        : this.applyTimeDecay(lengthNormalized);
       trace?.endStage(lifecycleRanked.map((r) => r.entry.id), lifecycleRanked.map((r) => r.score));
       if (diagnostics) diagnostics.stageCounts.afterTimeDecay = lifecycleRanked.length;
 
-      trace?.startStage("noise_filter", lifecycleRanked.map((r) => r.entry.id));
+      trace?.startStage("hard_cutoff", lifecycleRanked.map((r) => r.entry.id));
+      const hardFiltered = lifecycleRanked.filter((r) => r.score >= this.config.hardMinScore);
+      trace?.endStage(hardFiltered.map((r) => r.entry.id), hardFiltered.map((r) => r.score));
+      if (diagnostics) diagnostics.stageCounts.afterHardMinScore = hardFiltered.length;
+
+      trace?.startStage("noise_filter", hardFiltered.map((r) => r.entry.id));
       const denoised = this.config.filterNoise
-        ? filterNoise(lifecycleRanked, (r) => r.entry.text)
-        : lifecycleRanked;
+        ? filterNoise(hardFiltered, (r) => r.entry.text)
+        : hardFiltered;
       trace?.endStage(denoised.map((r) => r.entry.id), denoised.map((r) => r.score));
       if (diagnostics) diagnostics.stageCounts.afterNoiseFilter = denoised.length;
 
@@ -1229,6 +1309,7 @@ export class MemoryRetriever {
     query: string,
     queryVector: number[],
     results: RetrievalResult[],
+    diagnostics?: RetrievalDiagnostics,
   ): Promise<RetrievalResult[]> {
     if (results.length === 0) {
       return results;
@@ -1237,22 +1318,34 @@ export class MemoryRetriever {
     // Try cross-encoder rerank via configured provider API
     const provider = this.config.rerankProvider || "jina";
     const hasApiKey = !!this.config.rerankApiKey;
+    const recordFallback = (
+      reason: NonNullable<RetrievalDiagnostics["rerankFallback"]>["reason"],
+      message: string,
+    ) => {
+      if (diagnostics) {
+        diagnostics.rerankFallback = { provider, reason, message };
+      }
+    };
 
     if (this.config.rerank === "cross-encoder" && hasApiKey) {
       try {
         const model = this.config.rerankModel || "jina-reranker-v3";
         const endpoint =
           this.config.rerankEndpoint || "https://api.jina.ai/v1/rerank";
-        const documents = results.map((r) => r.entry.text);
+        // Limit documents to candidatePoolSize BEFORE passing to buildRerankRequest.
+        // This ensures ALL providers are limited, not just those that support topN in their API body.
+        // tei/dashscope ignore topN parameter but will now receive sliced documents.
+        const documents = results.slice(0, this.config.candidatePoolSize).map((r) => r.entry.text);
 
-        // Build provider-specific request
+        // cap topN for providers that support it (jina/pinecone/voyage)
+        const topN = Math.min(results.length, this.config.candidatePoolSize);
         const { headers, body } = buildRerankRequest(
           provider,
           this.config.rerankApiKey || "",
           model,
           query,
           documents,
-          results.length,
+          topN,
         );
 
         // Timeout: configurable via rerankTimeoutMs (default: 5000ms)
@@ -1278,6 +1371,7 @@ export class MemoryRetriever {
           const parsed = parseRerankResponse(provider, data);
 
           if (!parsed) {
+            recordFallback("invalid_response", "Rerank API returned an invalid response shape");
             console.warn(
               "Rerank API: invalid response shape, falling back to cosine",
             );
@@ -1322,14 +1416,21 @@ export class MemoryRetriever {
           }
         } else {
           const errText = await response.text().catch(() => "");
+          recordFallback(
+            "http_error",
+            `Rerank API returned ${response.status}: ${errText.slice(0, 200)}`,
+          );
           console.warn(
             `Rerank API returned ${response.status}: ${errText.slice(0, 200)}, falling back to cosine`,
           );
         }
       } catch (error) {
         if (error instanceof Error && error.name === "AbortError") {
-          console.warn(`Rerank API timed out (${this.config.rerankTimeoutMs ?? 5000}ms), falling back to cosine`);
+          const message = `Rerank API timed out (${this.config.rerankTimeoutMs ?? 5000}ms)`;
+          recordFallback("timeout", message);
+          console.warn(`${message}, falling back to cosine`);
         } else {
+          recordFallback("request_error", formatErrorMessage(error));
           console.warn("Rerank API failed, falling back to cosine:", error);
         }
       }
@@ -1353,6 +1454,7 @@ export class MemoryRetriever {
 
       return reranked.sort((a, b) => b.score - a.score);
     } catch (error) {
+      recordFallback("cosine_error", formatErrorMessage(error));
       console.warn("Reranking failed, returning original results:", error);
       return results;
     }
@@ -1599,14 +1701,88 @@ export class MemoryRetriever {
    * relevant (high score) and diverse (low similarity to already-selected).
    *
    * Uses cosine similarity between memory vectors. If two memories have
-   * cosine similarity > threshold (default 0.92), the lower-scored one
+   * cosine similarity > threshold (default 0.85), the lower-scored one
    * is demoted to the end rather than removed entirely.
    *
    * This prevents top-k from being filled with near-identical entries
    * (e.g. 3 similar "SVG style" memories) while keeping them available
    * if the pool is small.
+   *
+   * Complexity: O(n²) — pre-converts all vectors once at entry and uses
+   * Map-based O(1) id lookup, avoiding the O(n³) cost of repeated
+   * Array.from() calls inside the inner loop (original implementation).
+   *
+   * Duplicate IDs are detected upfront and routed to
+   * applyMMRDiversity_Fallback() which preserves original semantics using
+   * findIndex-based O(n²) approach (safe for small duplicate sets).
    */
   private applyMMRDiversity(
+    results: RetrievalResult[],
+    similarityThreshold = 0.85,
+  ): RetrievalResult[] {
+    if (results.length <= 1) return results;
+
+    // Detect duplicate IDs and route to fallback (preserves original semantics)
+    const seenIds = new Set<string>();
+    for (const r of results) {
+      if (seenIds.has(r.entry.id)) {
+        return this.applyMMRDiversity_Fallback(results, similarityThreshold);
+      }
+      seenIds.add(r.entry.id);
+    }
+
+    // Pre-convert all vectors once: O(n²) total for all conversions.
+    // This eliminates the O(n) Array.from() cost from the inner loop,
+    // reducing per-candidate similarity from O(n²) → O(n).
+    const vectorMap = new Map<string, number[]>();
+    for (const r of results) {
+      const vec = r.entry.vector;
+      if (vec?.length) {
+        vectorMap.set(r.entry.id, Array.from(vec as Iterable<number>));
+      }
+    }
+
+    const selected: RetrievalResult[] = [];
+    const deferred: RetrievalResult[] = [];
+
+    for (const candidate of results) {
+      const cArr = vectorMap.get(candidate.entry.id);
+      // Items without vectors cannot be compared → always selected
+      if (!cArr) {
+        selected.push(candidate);
+        continue;
+      }
+
+      // Check O(1) Map lookup for similarity against all selected items.
+      // selected.size ≤ n, so this is O(n) per candidate → O(n²) total.
+      let tooSimilar = false;
+      for (const s of selected) {
+        const sArr = vectorMap.get(s.entry.id);
+        if (sArr && cosineSimilarity(sArr, cArr) > similarityThreshold) {
+          tooSimilar = true;
+          break;
+        }
+      }
+
+      if (tooSimilar) {
+        deferred.push(candidate);
+      } else {
+        selected.push(candidate);
+      }
+    }
+
+    return [...selected, ...deferred];
+  }
+
+  /**
+   * Fallback diversity filter for duplicate-ID inputs.
+   * Uses findIndex-based O(n²) approach which is safe for duplicate
+   * sets (typically small) and correctly handles the ambiguous case where
+   * the same ID may have different vectors in different entries.
+   *
+   * @internal
+   */
+  private applyMMRDiversity_Fallback(
     results: RetrievalResult[],
     similarityThreshold = 0.85,
   ): RetrievalResult[] {
@@ -1616,19 +1792,16 @@ export class MemoryRetriever {
     const deferred: RetrievalResult[] = [];
 
     for (const candidate of results) {
-      // Check if this candidate is too similar to any already-selected result
-      const tooSimilar = selected.some((s) => {
-        // Both must have vectors to compare.
-        // LanceDB returns Arrow Vector objects (not plain arrays),
-        // so use .length directly and Array.from() for conversion.
+      // findIndex walks the selected array to check similarity.
+      // For small duplicate-ID sets this is acceptable (O(n²) total).
+      const tooSimilar = selected.findIndex((s) => {
         const sVec = s.entry.vector;
         const cVec = candidate.entry.vector;
         if (!sVec?.length || !cVec?.length) return false;
         const sArr = Array.from(sVec as Iterable<number>);
         const cArr = Array.from(cVec as Iterable<number>);
-        const sim = cosineSimilarity(sArr, cArr);
-        return sim > similarityThreshold;
-      });
+        return cosineSimilarity(sArr, cArr) > similarityThreshold;
+      }) !== -1;
 
       if (tooSimilar) {
         deferred.push(candidate);
@@ -1636,7 +1809,7 @@ export class MemoryRetriever {
         selected.push(candidate);
       }
     }
-    // Append deferred results at the end (available but deprioritized)
+
     return [...selected, ...deferred];
   }
 
@@ -1661,6 +1834,9 @@ export class MemoryRetriever {
       dropSummary: this.lastDiagnostics.dropSummary.map((drop) => ({
         ...drop,
       })),
+      rerankFallback: this.lastDiagnostics.rerankFallback
+        ? { ...this.lastDiagnostics.rerankFallback }
+        : undefined,
     };
   }
 

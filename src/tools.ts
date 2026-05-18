@@ -174,6 +174,7 @@ async function retrieveWithRetry(
     limit: number;
     scopeFilter?: string[];
     category?: string;
+    source?: "manual" | "auto-recall" | "cli";
   },
   countStore?: () => Promise<number>,
 ): Promise<RetrievalResult[]> {
@@ -602,6 +603,12 @@ export function registerMemoryRecallTool(
                   last_confirmed_use_at: now,
                   bad_recall_count: 0,
                   suppressed_until_turn: 0,
+                  // Manual recall is a strong positive signal — clear active
+                  // ms-based suppression too, matching pre-Tier1 semantics
+                  // where zeroing the turn field cleared the only suppression
+                  // mechanism. Without this, governance keeps suppressing a
+                  // memory the user just explicitly searched for.
+                  suppressed_until_ms: 0,
                 },
                 scopeFilter,
               );
@@ -1906,7 +1913,7 @@ export function registerMemoryPromoteTool(
             memoryId ?? query ?? "",
             scopeFilter,
           );
-          if (!resolved.ok) {
+          if (resolved.ok === false) {
             return {
               content: [{ type: "text", text: resolved.message }],
               details: resolved.details ?? { error: "resolve_failed" },
@@ -1931,6 +1938,10 @@ export function registerMemoryPromoteTool(
               last_confirmed_use_at: state === "confirmed" ? now : undefined,
               bad_recall_count: 0,
               suppressed_until_turn: 0,
+              // Promotion is a manual confirmation — clear active ms-based
+              // suppression alongside the legacy turn field (parallel to
+              // memory_recall above).
+              suppressed_until_ms: 0,
             },
             scopeFilter,
           );
@@ -2009,7 +2020,7 @@ export function registerMemoryArchiveTool(
             memoryId ?? query ?? "",
             scopeFilter,
           );
-          if (!resolved.ok) {
+          if (resolved.ok === false) {
             return {
               content: [{ type: "text", text: resolved.message }],
               details: resolved.details ?? { error: "resolve_failed" },
@@ -2198,7 +2209,7 @@ export function registerMemoryExplainRankTool(
             return [
               `${idx + 1}. [${r.entry.id}] score=${r.score.toFixed(3)} ${sourceBreakdown.join(" ")}`.trim(),
               `   state=${meta.state} layer=${meta.memory_layer} source=${meta.source} tier=${meta.tier}`,
-              `   access=${meta.access_count} injected=${meta.injected_count} badRecall=${meta.bad_recall_count} suppressedUntilTurn=${meta.suppressed_until_turn}`,
+              `   access=${meta.access_count} injected=${meta.injected_count} badRecall=${meta.bad_recall_count} suppressedUntilMs=${meta.suppressed_until_ms ?? "—"}`,
               `   text=${truncateText(normalizeInlineText(meta.l0_abstract || r.entry.text), 180)}`,
             ].join("\n");
           });
