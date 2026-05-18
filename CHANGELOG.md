@@ -1,4 +1,32 @@
+## 1.1.0-beta.11 (OpenClaw 2026.5 runtime compatibility)
+
+- Ship compiled `dist/index.js` runtime and point package/OpenClaw extension entries at it.
+- Declare `contracts.tools` for registered agent tools.
+- Avoid double-resolving already-absolute backup/admission audit paths.
+- Load LanceDB via ESM dynamic `import()` instead of `require()`.
+
 # Changelog
+
+## Unreleased
+
+### Fix: cumulative turn counting for auto-capture smart extraction (#417, PR #549)
+
+**Bug**: With `extractMinMessages: 2` + `smartExtraction: true`, single-turn DM conversations always fell through to regex fallback, writing dirty data (`l0_abstract == text`, no LLM distillation).
+
+**Root causes**:
+- `autoCaptureSeenTextCount` was overwritten per-event (always 1 for DM), never accumulating
+- `buildAutoCaptureConversationKeyFromIngress` returned `null` for DM (no `conversationId`), so `pendingIngressTexts` was never written
+
+**Changes**:
+- **Cumulative counting**: `autoCaptureSeenTextCount` now accumulates across events instead of overwriting per-event
+- **DM key fallback**: `buildAutoCaptureConversationKeyFromIngress` falls back to `channelId` when `conversationId` is falsy, so DM sessions now correctly write to `pendingIngressTexts` and match the key extracted by `buildAutoCaptureConversationKeyFromSessionKey`
+- **Smart extraction threshold**: now uses cumulative turn count (`currentCumulativeCount`) instead of per-event message count
+- **MAX_MESSAGE_LENGTH guard**: 5000 char limit per message in `pendingIngressTexts` rolling window prevents OOM from malformed input
+- **Test**: added `runCumulativeTurnCountingScenario` in `test/smart-extractor-branches.mjs` verifying turn-1 skip and turn-2 trigger with `extractMinMessages=2`
+
+**⚠️ Breaking change**: `extractMinMessages` semantics changed from "per-event message count" to "cumulative conversation turns". Before: each `agent_end` needed ≥N messages. After: smart extraction triggers at conversation turn N. This is a bug fix since the old semantics were structurally broken for DM; users relying on the old behavior may need to adjust their `extractMinMessages` values.
+
+---
 
 ## 1.1.0-beta.2 (Smart Memory Beta + Access Reinforcement)
 
