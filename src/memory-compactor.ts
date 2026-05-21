@@ -262,6 +262,27 @@ export interface CompactorLogger {
   warn(msg: string): void;
 }
 
+const MAX_PARALLEL_COMPACTION_PLANS = 4;
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(Math.max(1, concurrency), items.length);
+
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex++;
+      results[index] = await worker(items[index]);
+    }
+  }));
+
+  return results;
+}
+
 // ============================================================================
 // Main runner
 // ============================================================================
@@ -325,10 +346,10 @@ export async function runCompaction(
   let memoriesDeleted = 0;
   let memoriesCreated = 0;
 
-  // 【優化】使用 Promise.all 並行處理所有 plans
-  // 每個 plan 的 embed + store + delete 互相獨立，可以完全平行
-  const planResults = await Promise.all(
-    plans.map(async (plan) => {
+  const planResults = await mapWithConcurrency(
+    plans,
+    MAX_PARALLEL_COMPACTION_PLANS,
+    async (plan) => {
       const members = plan.memberIndices.map((i) => valid[i]);
       try {
         // Embed the merged text
@@ -343,27 +364,25 @@ export async function runCompaction(
           scope: plan.merged.scope,
           metadata: plan.merged.metadata,
         });
-        memoriesCreated++;
 
-        // 【優化】members 刪除也平行處理
-        const deleteResults = await Promise.all(
-          members.map(async (m) => {
-            const deleted = await store.delete(m.id);
-            return deleted;
-          })
-        );
-        const deletedCount = deleteResults.filter((d) => d === true).length;
-        memoriesDeleted += deletedCount;
+        let deletedCount = 0;
+        for (const m of members) {
+          const deleted = await store.delete(m.id);
+          if (deleted) deletedCount++;
+        }
 
-        return { success: true, deleted: deletedCount };
+        return { success: true, deleted: deletedCount, created: 1 };
       } catch (err) {
         logger?.warn(
           `memory-compactor: failed to merge cluster of ${members.length}: ${String(err)}`,
         );
-        return { success: false, error: err };
+        return { success: false, deleted: 0, created: 0 };
       }
-    })
+    },
   );
+
+  memoriesCreated = planResults.reduce((sum, result) => sum + result.created, 0);
+  memoriesDeleted = planResults.reduce((sum, result) => sum + result.deleted, 0);
 
   logger?.info(
     `memory-compactor: scanned=${valid.length} clusters=${plans.length} ` +
